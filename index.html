@@ -65,7 +65,7 @@ function call(fn, ...args) {
     .then(r => r.json()).then(j => { if (!j.ok) throw new Error(j.error); return j.result; });
 }
 // Interview state (also what a reconnect tells Gemini if the session can't be resumed)
-const STATE = { date: '', dateSpoken: '', project: null };
+const STATE = { date: '', dateSpoken: '', project: null, report: null };
 let ws = null, running = false, setupDone = false, resumeHandle = '', reconnecting = false;
 let ctx = null, micStream = null, micNode = null, nextPlay = 0, playing = [], wakeLock = null;
 let userText = '', botText = '';
@@ -123,11 +123,17 @@ Voice commands he can say at any time:
 - "go back": return to the previous step.
 
 Step 1 - Date: ask "What date is this report for?" Turn answers like "today", "yesterday" or "last Tuesday" into a date and call set_report_date with it as YYYY-MM-DD. Say the date back with the weekday and ask him to confirm. If he says no, ask again.
-Step 2 - Project: ask "Which project?" Call find_project with what he said (pass a project number as digits). If there is one clear match, ask "Is that <name>?" If there are several, read up to three names and ask which one. If none, look in his project list below yourself for the closest one (he may use a nickname, e.g. "WiFi phase 2" is "WiFi Ph 2"). If you still can't tell, ask him to say the name or the number again. When he confirms, call confirm_project with that project's number.
+Step 2 - Project: ask "Which project?" Call find_project with what he said (pass a project number as digits). If there is one clear match, ask "Is that <name>?" If there are several, read up to three names and ask which one. If none, look in his project list below yourself for the closest one (he may use a nickname, e.g. "WiFi phase 2" is "WiFi Ph 2"). If you still can't tell, ask him to say the name or the number again. When he confirms, call confirm_project with that project's number. If he later changes the date or the project, set it again and call confirm_project again.
 
 His active projects (number - name):
 ${INIT.projects.map(p => `${p.number} - ${p.calName && p.calName !== p.number ? p.calName + ' (' + p.name + ')' : p.name}`).join('\n')}
-Step 3 - this is a test version with only the first two steps: say "Date and project are set. That's all for this test. Say stop when you're done." Then wait quietly. Do not ask about anything else and do not invent report content.`;
+
+Step 3 - Read-back: confirm_project returns what the report already has. Read it back briefly as natural speech, at most about eight short sentences, in this order:
+  a) Site activity: the subcontractors in that day's draft; if the draft has none, the subcontractors from the last report, and say that report's date.
+  b) Inspections: the inspection requests for that day, saying which ones are deputy inspections, plus any inspection text already in the draft. Give the IR number and the type; don't read descriptions word for word.
+  c) Anything else already in the draft (HCAI visit, meetings, deficiencies), in a few words.
+  If there is no draft yet for that day, say so. Skip anything that is empty. Never add anything that is not in the data.
+Step 4 - this test version stops here: say "That's what the report has so far. This test stops here. Say repeat to hear it again, or stop." If he says repeat, read it back again. Do not ask about anything else yet.`;
 }
 
 const TOOLS = [{ functionDeclarations: [
@@ -187,6 +193,32 @@ function findProjects(query) {
     .map(x => ({ number: x.p.number, name: projName(x.p), fullName: x.p.name }));
 }
 
+// Stage 2: the day's draft, the last report's site activity and the day's inspection requests, for the read-back
+async function loadReport(p) {
+  const out = { ok: true, number: p.number, name: projName(p) };
+  status('Loading the report…');
+  try {
+    const r = await call('driveReport', KEY, STATE.date || INIT.today, p.number);
+    STATE.report = r;
+    const sections = r.draft ? Object.fromEntries(Object.entries(r.draft.sections).filter(([, l]) => l.length)) : {};
+    log('App', `Report ${r.date}: ${r.draft ? 'draft found (' + (Object.keys(sections).join(', ') || 'empty') + ')' : 'no draft yet'}; ` +
+      `${r.inspections.length} inspection request(s) on the IR Log; last report ${r.previous ? r.previous.date : 'none'}.`);
+    out.report = {
+      draftForThisDay: r.draft ? 'yes' : 'no draft yet for this day',
+      draftSections: sections,
+      lastReportDate: r.previous ? r.previous.date : 'none found',
+      lastReportSiteActivity: r.previous ? r.previous.siteActivity : [],
+      inspectionRequestsThisDay: r.inspections.map(i => `IR# ${i.ir} - ${i.type}${i.time ? ' at ' + i.time : ''} - ` +
+        `${i.inspectedBy === 'Deputy' ? 'deputy inspection' : 'IOR inspection'}${i.contractor ? ' - ' + i.contractor : ''}${i.location ? ' - ' + i.location : ''}`)
+    };
+  } catch (e) {
+    log('App', 'Report not loaded: ' + (e.message || e));
+    out.reportError = 'The report could not be loaded (' + (e.message || e) + '). Tell him briefly and offer to try again.';
+  }
+  status('Listening…');
+  return out;
+}
+
 function runTool(name, args) {
   args = args || {};
   if (name === 'set_report_date') {
@@ -208,7 +240,7 @@ function runTool(name, args) {
     const p = INIT.projects.find(x => x.number.toUpperCase() === n);
     if (!p) return { ok: false, error: 'That number is not one of the active projects. Search again.' };
     STATE.project = p; chips(); log('App', `Project set: ${p.number} ${projName(p)}`);
-    return { ok: true, number: p.number, name: projName(p) };
+    return loadReport(p);
   }
   if (name === 'end_interview') {
     // let the goodbye finish playing first
@@ -320,7 +352,8 @@ function onMessage(m, resuming) {
     // A new session (first start, or the old one couldn't be resumed): tell Gemini what is already set
     const known = [STATE.date ? `the date is set to ${STATE.dateSpoken} (${STATE.date})` : '',
       STATE.project ? `the project is set to ${STATE.project.number} ${projName(STATE.project)}` : ''].filter(Boolean);
-    const text = known.length ? `We were cut off. Already done: ${known.join(' and ')}. Briefly say you're back and continue from the next step.`
+    const text = known.length ? `We were cut off. Already done: ${known.join(' and ')}. Briefly say you're back and continue from the next step` +
+        (STATE.project ? ' (call confirm_project again with the same number to get the report data back).' : '.')
       : 'Start the interview.';
     send({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } });
     return;
@@ -329,8 +362,10 @@ function onMessage(m, resuming) {
   if (m.goAway) { reconnect(); return; }
   if (m.toolCall) {
     flushTurn();
-    const functionResponses = (m.toolCall.functionCalls || []).map(fc => ({ id: fc.id, name: fc.name, response: runTool(fc.name, fc.args) }));
-    send({ toolResponse: { functionResponses } });
+    // A tool may wait on the server (the report); reply when all of this call's tools are done
+    Promise.all((m.toolCall.functionCalls || []).map(async fc => ({ id: fc.id, name: fc.name,
+      response: await Promise.resolve(runTool(fc.name, fc.args)).catch(e => ({ ok: false, error: String(e && e.message || e) })) })))
+      .then(functionResponses => send({ toolResponse: { functionResponses } }));
     return;
   }
   const sc = m.serverContent;
