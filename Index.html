@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <!-- Also set the viewport with HtmlOutput.addMetaTag() in your existing doGet(). -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inspect Tech — Field Report</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body { background-color: #f3f4f6; -webkit-tap-highlight-color: transparent; }
+    .btn-brand { background-color: #0b2545; color: #fff; }
+    .btn-brand:active { background-color: #134074; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    input:disabled, textarea:disabled { opacity: 0.75; }
+  </style>
+</head>
+<body class="p-4 max-w-3xl mx-auto">
+  <main class="bg-white rounded-xl shadow p-5">
+    <div class="flex items-center justify-between border-b pb-3 mb-4">
+      <img src="https://lh3.googleusercontent.com/d/1NGrj3oeDRsIwoV31KCp5PceWbkrlCj1p"
+           alt="Inspect Tech Logo" class="h-10 w-auto object-contain">
+      <span class="text-xs bg-blue-100 text-blue-800 py-1 px-2.5 rounded-full font-bold">Title 24</span>
+    </div>
+
+    <form id="reportForm" novalidate>
+      <div class="mb-4">
+        <label for="reportDate" class="block text-xs font-bold text-gray-700 uppercase mb-1">Inspection Date</label>
+        <input type="date" id="reportDate" required
+               class="w-full border rounded-lg p-2.5 bg-gray-50 text-sm font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-900">
+      </div>
+
+      <div class="mb-4">
+        <label for="projectSelect" class="block text-xs font-bold text-gray-700 uppercase mb-1">Active Project</label>
+        <input type="text" id="projectSelect" list="projectList" required disabled
+               placeholder="Loading active projects..." autocomplete="off"
+               class="w-full border rounded-lg p-2.5 bg-gray-50 text-sm font-semibold text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-900">
+        <datalist id="projectList"></datalist>
+        <p id="projectStatus" class="mt-1 text-xs text-gray-600" role="status"></p>
+        <button id="retryProjectsBtn" type="button" hidden
+                class="mt-2 text-xs text-blue-900 underline">Reload active projects</button>
+      </div>
+
+      <div class="mb-4 relative">
+        <div class="flex flex-wrap justify-between items-center mb-1 gap-1">
+          <label for="dailyNotes" class="block text-xs font-bold text-gray-700 uppercase">Field Observations</label>
+          
+          <!-- Quick-Action Buttons -->
+          <div class="flex items-center space-x-1">
+            <button id="addPmBtn" type="button" class="text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-0.5 rounded border border-gray-300">+ PM</button>
+            <button id="addSubBtn" type="button" class="text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-0.5 rounded border border-gray-300">+ Sub</button>
+            <button id="addDeputyBtn" type="button" class="text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-0.5 rounded border border-gray-300">+ Deputy</button>
+            <button id="addHcaiBtn" type="button" class="text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-0.5 rounded border border-gray-300">+ HCAI</button>
+            <button id="micBtn" type="button" class="text-xs text-blue-900 font-bold flex items-center bg-blue-50 px-2 py-0.5 rounded border border-blue-200">🎙️ Dictate</button>
+          </div>
+        </div>
+
+        <!-- Autocomplete Suggestion Popover -->
+        <div id="mentionMenu" class="hidden absolute left-0 right-0 bottom-full mb-1 bg-white border border-blue-300 rounded-lg shadow-xl z-50 overflow-hidden">
+          <div class="bg-blue-900 text-white px-3 py-1.5 text-xs font-bold flex justify-between items-center">
+            <span id="mentionMenuTitle">Select Contact / Trade</span>
+            <span class="text-blue-200" style="font-size:10px">Esc to close</span>
+          </div>
+          <div id="mentionOptions" class="max-h-44 overflow-y-auto divide-y divide-gray-100 text-xs"></div>
+        </div>
+
+        <textarea id="dailyNotes" rows="5"
+                  placeholder="Type or dictate notes... Use @pm, @sub, @sub electrical, @deputy, or tap buttons above"
+                  class="w-full border rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-900"></textarea>
+      </div>
+      
+      <div class="mb-5">
+        <label for="cameraInput" class="block text-xs font-bold text-gray-700 uppercase mb-1">Site Photos (Auto-Watermarked)</label>
+        <input type="file" id="cameraInput" accept="image/*" capture="environment" multiple class="hidden" disabled>
+        <button id="attachBtn" type="button" disabled
+                class="w-full py-3 border-2 border-dashed border-gray-300 rounded-lg flex items-center justify-center text-sm font-bold text-gray-600 bg-gray-50 active:bg-gray-100">📷 Take Photo / Attach</button>
+        <p id="photoStatus" class="mt-2 text-xs text-gray-600" role="status"></p>
+        <div id="photoPreviewGrid" class="grid grid-cols-3 gap-2 mt-3"></div>
+      </div>
+
+      <button id="submitBtn" type="submit" disabled
+              class="w-full btn-brand py-3.5 rounded-lg font-bold text-sm tracking-wide shadow flex items-center justify-center">Submit to Daily Report</button>
+    </form>
+    <div id="statusMessage" class="hidden mt-4 p-3 rounded-lg text-xs font-semibold" role="status" aria-live="polite"></div>
+  </main>
+
+  <!-- Photo markup editor: arrow / box / circle / text, drawn on the photo before it is uploaded -->
+  <div id="markupEditor" class="hidden fixed inset-0 z-50 bg-black flex flex-col" role="dialog" aria-label="Mark up photo">
+    <div class="flex flex-wrap items-center gap-1 p-2 bg-gray-900">
+      <button type="button" data-tool="arrow" class="mk-tool px-3 py-2 rounded text-sm font-bold">↗ Arrow</button>
+      <button type="button" data-tool="box" class="mk-tool px-3 py-2 rounded text-sm font-bold">▢ Box</button>
+      <button type="button" data-tool="circle" class="mk-tool px-3 py-2 rounded text-sm font-bold">◯ Circle</button>
+      <button type="button" data-tool="text" class="mk-tool px-3 py-2 rounded text-sm font-bold">T Text</button>
+      <span class="mx-1"></span>
+      <button type="button" data-color="#ff1a1a" class="mk-color w-8 h-8 rounded-full border-2" style="background:#ff1a1a" aria-label="Red"></button>
+      <button type="button" data-color="#ffd400" class="mk-color w-8 h-8 rounded-full border-2" style="background:#ffd400" aria-label="Yellow"></button>
+      <button type="button" data-color="#ffffff" class="mk-color w-8 h-8 rounded-full border-2" style="background:#ffffff" aria-label="White"></button>
+    </div>
+    <div id="markupSelBar" class="hidden flex flex-wrap items-center gap-1 px-2 pb-2 bg-gray-900">
+      <span class="text-xs text-gray-300 mr-1">Selected:</span>
+      <button type="button" id="markupSmaller" class="px-3 py-2 rounded bg-gray-700 text-white text-sm font-bold">− Smaller</button>
+      <button type="button" id="markupBigger" class="px-3 py-2 rounded bg-gray-700 text-white text-sm font-bold">＋ Bigger</button>
+      <button type="button" id="markupEditText" class="px-3 py-2 rounded bg-gray-700 text-white text-sm font-bold">✎ Edit text</button>
+      <button type="button" id="markupDelete" class="px-3 py-2 rounded bg-red-700 text-white text-sm font-bold">🗑 Delete</button>
+    </div>
+    <div id="markupStage" class="flex-1 flex items-center justify-center overflow-hidden">
+      <canvas id="markupCanvas" style="touch-action:none"></canvas>
+    </div>
+    <p id="markupHint" class="text-center text-xs text-gray-300 px-2 pb-1">Drag to draw. Tap a mark to select it: drag it to move, drag the white dots to resize.</p>
+    <div class="flex gap-2 p-2 bg-gray-900">
+      <button type="button" id="markupUndo" class="flex-1 py-3 rounded bg-gray-700 text-white text-sm font-bold">↶ Undo</button>
+      <button type="button" id="markupCancel" class="flex-1 py-3 rounded bg-gray-700 text-white text-sm font-bold">Cancel</button>
+      <button type="button" id="markupDone" class="flex-1 py-3 rounded btn-brand text-sm font-bold">✓ Done</button>
+    </div>
+  </div>
+
+
+  <script>
+    // REQUIRED: replace the empty string with the exact name of the public .gs
+    // function that returns your active projects. Do not include parentheses.
+    // Expected return: [{ shortNumber: '123', name: 'Project name', ... }].
+    // Extra project fields are preserved and sent back to the report backend.
+    const PROJECTS_FUNCTION = 'getMobileProjects';
+
+    let projectList = [];
+    let photos = [];
+    let photoContext = null;
+    let loadingProjects = false;
+    let processingPhotos = false;
+    let submitting = false;
+    let recognition = null;
+    let dictationStopping = false;
+    let dictationDone = Promise.resolve();
+    let finishDictation = null;
+
+    const $ = (id) => document.getElementById(id);
+    const errorMessage = (error) => error && error.message ? error.message : String(error || 'Unknown error');
+
+    function localDateString(date = new Date()) {
+      const pad = (value) => String(value).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    }
+
+    function showStatus(message, kind = 'info') {
+      const colors = {
+        info: 'bg-blue-50 text-blue-900 border-blue-200',
+        success: 'bg-green-50 text-green-800 border-green-200',
+        error: 'bg-red-50 text-red-800 border-red-200',
+        warning: 'bg-yellow-50 text-yellow-900 border-yellow-200'
+      };
+      $('statusMessage').className = `mt-4 p-3 rounded-lg text-xs font-semibold border ${colors[kind] || colors.info}`;
+      $('statusMessage').textContent = message;
+    }
+
+    function updateControls() {
+      const busy = loadingProjects || processingPhotos || submitting;
+      const hasProjects = projectList.length > 0;
+      $('projectSelect').disabled = busy || !hasProjects || photos.length > 0;
+      $('reportDate').disabled = busy || photos.length > 0;
+      $('dailyNotes').disabled = submitting;
+      $('micBtn').disabled = submitting || processingPhotos || dictationStopping;
+      $('cameraInput').disabled = busy || !hasProjects;
+      $('attachBtn').disabled = busy || !hasProjects;
+      $('submitBtn').disabled = busy || !hasProjects;
+      $('retryProjectsBtn').disabled = busy || photos.length > 0;
+      $('submitBtn').textContent = submitting ? 'Polishing with Gemini & Saving...'
+        : processingPhotos ? 'Processing Photos...' : 'Submit to Daily Report';
+      document.querySelectorAll('[data-remove-photo],[data-edit-photo]').forEach((button) => {
+        button.disabled = submitting || processingPhotos;
+      });
+      $('photoStatus').textContent = processingPhotos ? 'Processing photos. Please wait...'
+        : photos.length ? `${photos.length} photo(s) attached. Remove all photos to change the project or date.`
+        : 'Choose a project and inspection date before attaching photos.';
+    }
+
+    function callServer(functionName, ...args) {
+      return new Promise((resolve, reject) => {
+        if (!window.google || !google.script || !google.script.run) {
+          reject(new Error('Open this page through your deployed Apps Script web app.'));
+          return;
+        }
+        try {
+          const runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+          if (typeof runner[functionName] !== 'function') {
+            throw new Error(`Server function "${functionName}" is unavailable. Check its name and deployment.`);
+          }
+          runner[functionName](...args);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    }
+
+    async function loadProjects() {
+      if (loadingProjects || processingPhotos || submitting || photos.length) return;
+      const functionName = PROJECTS_FUNCTION.trim();
+      if (!functionName) {
+        $('projectSelect').placeholder = 'Project loading needs setup';
+        $('projectStatus').textContent = 'Set PROJECTS_FUNCTION in Index.html to your active-projects function name.';
+        updateControls();
+        return;
+      }
+      loadingProjects = true;
+      projectList = [];
+      $('projectList').replaceChildren();
+      $('projectStatus').textContent = 'Loading active projects...';
+      $('retryProjectsBtn').hidden = true;
+      updateControls();
+      try {
+        const projects = await callServer(functionName);
+        if (!Array.isArray(projects) || projects.some((project) => !project ||
+            !['string', 'number'].includes(typeof project.shortNumber) ||
+            !String(project.shortNumber).trim() || typeof project.name !== 'string')) {
+          throw new Error('The project loader must return an array of projects with shortNumber and name fields.');
+        }
+        projectList = projects;
+        projects.forEach((project) => {
+          const option = document.createElement('option');
+          option.value = `${project.shortNumber} - ${project.name}`;
+          $('projectList').appendChild(option);
+        });
+        $('projectSelect').placeholder = projects.length ? 'Type project # or select...' : 'No active projects found';
+        $('projectStatus').textContent = projects.length ? '' : 'No active projects were returned.';
+        $('retryProjectsBtn').hidden = projects.length > 0;
+      } catch (error) {
+        $('projectSelect').placeholder = 'Projects could not be loaded';
+        $('projectStatus').textContent = errorMessage(error);
+        $('retryProjectsBtn').hidden = false;
+      } finally {
+        loadingProjects = false;
+        updateControls();
+      }
+    }
+
+    function selectedProject() {
+      const value = $('projectSelect').value.trim();
+      const exact = projectList.filter((project) => `${project.shortNumber} - ${project.name}` === value);
+      if (exact.length) return exact.length === 1 ? exact[0] : null;
+      const byNumber = projectList.filter((project) => String(project.shortNumber).trim() === value);
+      return byNumber.length === 1 ? byNumber[0] : null;
+    }
+
+    function reportContext() {
+      const project = selectedProject();
+      if (!project) throw new Error('Please select a valid active project. If project numbers repeat, select the full project name.');
+      const date = $('reportDate').value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !$('reportDate').checkValidity()) {
+        throw new Error('Please select a valid inspection date.');
+      }
+      if (photoContext && (photoContext.project !== project || photoContext.date !== date)) {
+        throw new Error('The attached photos belong to a different project or date. Remove them before changing the report.');
+      }
+      return { project, date };
+    }
+
+    async function toggleVoiceDictation() {
+      if (submitting || processingPhotos || dictationStopping) return;
+      if (recognition) {
+        try { await stopDictation(); } catch (error) { showStatus(errorMessage(error), 'error'); }
+        return;
+      }
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        showStatus('Dictation is not supported by this browser. Use the microphone on your mobile keyboard instead.', 'warning');
+        return;
+      }
+      try {
+        const session = new SpeechRecognition();
+        recognition = session;
+        session.continuous = true;
+        session.interimResults = false;
+        dictationDone = new Promise((resolve) => {
+          finishDictation = () => {
+            if (recognition === session) {
+              recognition = null;
+              dictationStopping = false;
+              finishDictation = null;
+              $('micBtn').textContent = '🎙️ Dictate';
+              $('micBtn').classList.remove('bg-red-100', 'text-red-700');
+              updateControls();
+            }
+            resolve();
+          };
+        });
+        const finish = finishDictation;
+        session.onstart = () => {
+          if (recognition !== session) return;
+          $('micBtn').textContent = '⏹️ Stop Dictation';
+          $('micBtn').classList.add('bg-red-100', 'text-red-700');
+        };
+        session.onresult = (event) => {
+          if (recognition !== session) return;
+          const words = [];
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            if (event.results[i].isFinal) words.push(event.results[i][0].transcript);
+          }
+          if (words.length) $('dailyNotes').value = `${$('dailyNotes').value} ${words.join(' ')}`.trim();
+        };
+        session.onend = finish;
+        session.onerror = (event) => {
+          if (recognition !== session) return;
+          if (event.error !== 'aborted') {
+            showStatus(`Dictation stopped (${event.error || 'microphone error'}). You can type or use your keyboard microphone.`, 'warning');
+          }
+          finish();
+        };
+        session.start();
+      } catch (error) {
+        if (finishDictation) finishDictation();
+        showStatus(`Could not start dictation: ${errorMessage(error)}`, 'error');
+      }
+    }
+
+    async function stopDictation() {
+      if (!recognition) return;
+      const session = recognition;
+      const done = dictationDone;
+      const finish = finishDictation;
+      let timer;
+      dictationStopping = true;
+      updateControls();
+      try {
+        session.stop();
+        await Promise.race([
+          done,
+          new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Dictation did not finish. Check your notes before submitting again.')), 8000);
+          })
+        ]);
+      } catch (error) {
+        finish();
+        try { session.abort(); } catch (_) { /* Already stopped. */ }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function watermarkPhoto(file, context) {
+      return new Promise((resolve, reject) => {
+        if (file.type && !file.type.startsWith('image/')) {
+          reject(new Error('Please choose an image file.'));
+          return;
+        }
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('The image file could not be read.'));
+        reader.onabort = () => reject(new Error('Reading the image was cancelled.'));
+        reader.onload = () => {
+          const image = new Image();
+          image.onerror = () => reject(new Error('This image format could not be opened. Try a JPEG or PNG.'));
+          image.onload = () => {
+            try {
+              if (!image.naturalWidth || !image.naturalHeight) throw new Error('The image has no usable dimensions.');
+              const scale = Math.min(1, 1200 / Math.max(image.naturalWidth, image.naturalHeight));
+              const width = Math.max(1, Math.round(image.naturalWidth * scale));
+              const height = Math.max(1, Math.round(image.naturalHeight * scale));
+              const canvas = document.createElement('canvas');
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              if (!ctx) throw new Error('Your browser could not prepare this photo.');
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, width, height);
+              ctx.drawImage(image, 0, 0, width, height);
+              // Unmarked copy, so markups can be changed or undone later; the watermark is drawn last (composePhoto)
+              const base = canvas.toDataURL('image/jpeg', 0.9);
+              const stamp = photoStamp(context);
+              drawWatermark(ctx, width, height, stamp);
+              const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+              if (!dataUrl.startsWith('data:image/jpeg;base64,')) throw new Error('The photo could not be encoded as JPEG.');
+              resolve({ dataUrl, base, stamp, shapes: [], name: file.name || 'Site photo' });
+            } catch (error) { reject(error); }
+          };
+          image.src = reader.result;
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    /** Watermark text: project number | short project name | date, e.g. "S252101 | SDS NC | 9/14/2026". */
+    function photoStamp(context) {
+      const [y, m, d] = context.date.split('-').map(Number);
+      return [context.project.shortNumber, String(context.project.name || '').trim(), `${m}/${d}/${y}`].filter(Boolean).join(' | ');
+    }
+
+    function drawWatermark(ctx, width, height, stamp) {
+      const bannerHeight = Math.min(height, Math.max(45, Math.round(height * 0.06)));
+      const padding = Math.min(20, width * 0.03);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.fillRect(0, height - bannerHeight, width, bannerHeight);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${Math.max(1, Math.round(bannerHeight * 0.38))}px sans-serif`;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(stamp, padding, height - bannerHeight / 2, width - padding * 2);
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error('The photo could not be reopened.'));
+        image.src = src;
+      });
+    }
+
+    // ---- Markups: shapes are kept in photo pixels, so they can be redrawn at any size ----
+    // shape: {type: arrow|box|circle|text, color, x1, y1, x2, y2, text, scale}. scale = line thickness / text size (1 = normal).
+    function markupLineWidth(width, scale = 1) { return Math.max(2, Math.round(width / 180 * scale)); }
+    function markupFontSize(width, scale = 1) { return Math.max(12, Math.round(Math.max(18, width / 26) * scale)); }
+
+    function drawShape(ctx, shape, width) {
+      const lw = markupLineWidth(width, shape.scale || 1);
+      ctx.save();
+      ctx.strokeStyle = shape.color;
+      ctx.fillStyle = shape.color;
+      ctx.lineWidth = lw;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.shadowColor = 'rgba(0,0,0,0.6)';
+      ctx.shadowBlur = lw;
+      const { x1, y1, x2, y2 } = shape;
+      if (shape.type === 'box') {
+        ctx.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+      } else if (shape.type === 'circle') {
+        ctx.beginPath();
+        ctx.ellipse((x1 + x2) / 2, (y1 + y2) / 2, Math.max(1, Math.abs(x2 - x1) / 2), Math.max(1, Math.abs(y2 - y1) / 2), 0, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (shape.type === 'arrow') {
+        const angle = Math.atan2(y2 - y1, x2 - x1), head = lw * 5;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x2, y2);
+        ctx.lineTo(x2 - head * Math.cos(angle - Math.PI / 7), y2 - head * Math.sin(angle - Math.PI / 7));
+        ctx.lineTo(x2 - head * Math.cos(angle + Math.PI / 7), y2 - head * Math.sin(angle + Math.PI / 7));
+        ctx.closePath();
+        ctx.fill();
+      } else if (shape.type === 'text') {
+        const size = markupFontSize(width, shape.scale || 1);
+        ctx.shadowBlur = 0;
+        ctx.font = `bold ${size}px sans-serif`;
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = Math.max(3, Math.round(size / 7));
+        ctx.strokeStyle = shape.color === '#ffffff' || shape.color === '#ffd400' ? '#000000' : '#ffffff';
+        ctx.strokeText(shape.text, x1, y1);
+        ctx.fillText(shape.text, x1, y1);
+      }
+      ctx.restore();
+    }
+
+    /** Unmarked photo + markups + watermark -> the JPEG that is uploaded. */
+    async function composePhoto(photo) {
+      const image = await loadImage(photo.base);
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(image, 0, 0);
+      photo.shapes.forEach((shape) => drawShape(ctx, shape, canvas.width));
+      drawWatermark(ctx, canvas.width, canvas.height, photo.stamp);
+      return canvas.toDataURL('image/jpeg', 0.8);
+    }
+
+    const markup = { photo: null, image: null, shapes: [], history: [], tool: 'arrow', color: '#ff1a1a',
+      selected: -1, action: null };
+
+    async function openMarkup(index) {
+      if (submitting || processingPhotos || !photos[index]) return;
+      markup.photo = photos[index];
+      markup.shapes = markup.photo.shapes.map((shape) => Object.assign({}, shape));
+      markup.history = [];
+      markup.selected = -1;
+      markup.action = null;
+      try { markup.image = await loadImage(markup.photo.base); } catch (error) { showStatus(errorMessage(error), 'error'); return; }
+      const canvas = $('markupCanvas');
+      canvas.width = markup.image.naturalWidth;
+      canvas.height = markup.image.naturalHeight;
+      $('markupEditor').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+      setMarkupTool(markup.tool);
+      setMarkupColor(markup.color);
+      redrawMarkup();
+      fitMarkupCanvas();
+    }
+
+    function fitMarkupCanvas() {
+      const canvas = $('markupCanvas'), stage = $('markupStage');
+      const scale = Math.min(stage.clientWidth / canvas.width, stage.clientHeight / canvas.height);
+      canvas.style.width = `${Math.floor(canvas.width * scale)}px`;
+      canvas.style.height = `${Math.floor(canvas.height * scale)}px`;
+    }
+
+    /** Photo pixels per screen pixel (so touch targets are the same size on any photo). */
+    function markupPx() {
+      const canvas = $('markupCanvas'), rect = canvas.getBoundingClientRect();
+      return rect.width ? canvas.width / rect.width : 1;
+    }
+
+    /** Bounding box of a shape in photo pixels: {x, y, w, h}. */
+    function shapeBounds(shape) {
+      if (shape.type === 'text') {
+        const ctx = $('markupCanvas').getContext('2d');
+        const size = markupFontSize($('markupCanvas').width, shape.scale || 1);
+        ctx.save();
+        ctx.font = `bold ${size}px sans-serif`;
+        const w = ctx.measureText(shape.text).width;
+        ctx.restore();
+        return { x: shape.x1, y: shape.y1 - size / 2, w, h: size };
+      }
+      return { x: Math.min(shape.x1, shape.x2), y: Math.min(shape.y1, shape.y2), w: Math.abs(shape.x2 - shape.x1), h: Math.abs(shape.y2 - shape.y1) };
+    }
+
+    /** Resize handles of a shape: [{id, x, y}]. */
+    function shapeHandles(shape) {
+      if (shape.type === 'arrow') return [{ id: 'p1', x: shape.x1, y: shape.y1 }, { id: 'p2', x: shape.x2, y: shape.y2 }];
+      const b = shapeBounds(shape);
+      if (shape.type === 'text') return [{ id: 'size', x: b.x + b.w, y: b.y + b.h }];
+      return [{ id: 'tl', x: b.x, y: b.y }, { id: 'tr', x: b.x + b.w, y: b.y }, { id: 'bl', x: b.x, y: b.y + b.h }, { id: 'br', x: b.x + b.w, y: b.y + b.h }];
+    }
+
+    function distToSegment(p, a, b) {
+      const dx = b.x - a.x, dy = b.y - a.y, len = dx * dx + dy * dy;
+      const t = len ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len)) : 0;
+      return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+    }
+
+    /** Is point p on the shape? Boxes and circles are picked up by their outline, so you can still draw inside them. */
+    function hitShape(shape, p, tol) {
+      if (shape.type === 'arrow') return distToSegment(p, { x: shape.x1, y: shape.y1 }, { x: shape.x2, y: shape.y2 }) <= tol;
+      const b = shapeBounds(shape);
+      if (shape.type === 'text') return p.x >= b.x - tol && p.x <= b.x + b.w + tol && p.y >= b.y - tol && p.y <= b.y + b.h + tol;
+      if (shape.type === 'box') {
+        const inOuter = p.x >= b.x - tol && p.x <= b.x + b.w + tol && p.y >= b.y - tol && p.y <= b.y + b.h + tol;
+        const inInner = p.x > b.x + tol && p.x < b.x + b.w - tol && p.y > b.y + tol && p.y < b.y + b.h - tol;
+        return inOuter && !inInner;
+      }
+      const rx = Math.max(1, b.w / 2), ry = Math.max(1, b.h / 2);
+      const d = Math.hypot((p.x - (b.x + rx)) / rx, (p.y - (b.y + ry)) / ry);
+      return Math.abs(d - 1) * Math.min(rx, ry) <= tol;
+    }
+
+    function redrawMarkup() {
+      const canvas = $('markupCanvas'), ctx = canvas.getContext('2d');
+      ctx.drawImage(markup.image, 0, 0);
+      markup.shapes.forEach((shape) => drawShape(ctx, shape, canvas.width));
+      const sel = markup.shapes[markup.selected];
+      if (sel) {
+        const px = markupPx(), b = shapeBounds(sel), pad = 6 * px;
+        ctx.save();
+        ctx.strokeStyle = '#60a5fa';
+        ctx.lineWidth = 2 * px;
+        ctx.setLineDash([6 * px, 4 * px]);
+        if (sel.type !== 'arrow') ctx.strokeRect(b.x - pad, b.y - pad, b.w + pad * 2, b.h + pad * 2);
+        ctx.setLineDash([]);
+        shapeHandles(sel).forEach((h) => {
+          ctx.beginPath();
+          ctx.arc(h.x, h.y, 9 * px, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff';
+          ctx.fill();
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
+      $('markupUndo').disabled = !markup.history.length;
+      $('markupSelBar').classList.toggle('hidden', !sel);
+      $('markupEditText').classList.toggle('hidden', !sel || sel.type !== 'text');
+    }
+
+    /** Saves the shapes before a change, for Undo. */
+    function remember() {
+      markup.history.push(JSON.stringify(markup.shapes));
+      if (markup.history.length > 50) markup.history.shift();
+    }
+
+    function setMarkupTool(tool) {
+      markup.tool = tool;
+      document.querySelectorAll('.mk-tool').forEach((b) => {
+        b.className = `mk-tool px-3 py-2 rounded text-sm font-bold ${b.dataset.tool === tool ? 'bg-white text-gray-900' : 'bg-gray-700 text-white'}`;
+      });
+    }
+
+    function setMarkupColor(color) {
+      markup.color = color;
+      document.querySelectorAll('.mk-color').forEach((b) => {
+        b.style.borderColor = b.dataset.color === color ? '#60a5fa' : '#4b5563';
+        b.style.transform = b.dataset.color === color ? 'scale(1.15)' : '';
+      });
+      const sel = markup.shapes[markup.selected];
+      if (sel && sel.color !== color) { remember(); sel.color = color; redrawMarkup(); }
+    }
+
+    function resizeSelected(factor) {
+      const sel = markup.shapes[markup.selected];
+      if (!sel) return;
+      remember();
+      sel.scale = Math.max(0.3, Math.min(5, (sel.scale || 1) * factor));
+      redrawMarkup();
+    }
+
+    function markupPoint(event) {
+      const canvas = $('markupCanvas'), rect = canvas.getBoundingClientRect();
+      return { x: (event.clientX - rect.left) * canvas.width / rect.width, y: (event.clientY - rect.top) * canvas.height / rect.height };
+    }
+
+    function closeMarkup() {
+      $('markupEditor').classList.add('hidden');
+      document.body.style.overflow = '';
+      markup.photo = null;
+      markup.image = null;
+      markup.action = null;
+      markup.selected = -1;
+    }
+
+    async function saveMarkup() {
+      const photo = markup.photo;
+      if (!photo) return;
+      photo.shapes = markup.shapes;
+      closeMarkup();
+      processingPhotos = true;
+      updateControls();
+      try {
+        photo.dataUrl = await composePhoto(photo);
+        renderPhotos();
+        showStatus(photo.shapes.length ? 'Markups saved on the photo.' : 'Markups removed.');
+      } catch (error) {
+        showStatus(errorMessage(error), 'error');
+      } finally {
+        processingPhotos = false;
+        updateControls();
+      }
+    }
+
+    function initMarkupEditor() {
+      const canvas = $('markupCanvas');
+      document.querySelectorAll('.mk-tool').forEach((b) => b.addEventListener('click', () => {
+        setMarkupTool(b.dataset.tool);
+        markup.selected = -1;
+        redrawMarkup();
+      }));
+      document.querySelectorAll('.mk-color').forEach((b) => b.addEventListener('click', () => setMarkupColor(b.dataset.color)));
+
+      canvas.addEventListener('pointerdown', (event) => {
+        if (!markup.photo) return;
+        event.preventDefault();
+        const p = markupPoint(event), px = markupPx(), tol = 16 * px;
+        // 1. A handle of the selected shape: resize
+        const sel = markup.shapes[markup.selected];
+        const handle = sel && shapeHandles(sel).find((h) => Math.hypot(p.x - h.x, p.y - h.y) <= tol * 1.3);
+        if (handle) {
+          remember();
+          if (sel.type === 'box' || sel.type === 'circle') {   // corners are easier to move with x1 < x2, y1 < y2
+            const b = shapeBounds(sel);
+            Object.assign(sel, { x1: b.x, y1: b.y, x2: b.x + b.w, y2: b.y + b.h });
+          }
+          markup.action = { kind: 'resize', handle: handle.id, start: p, orig: Object.assign({}, sel), width: shapeBounds(sel).w };
+          canvas.setPointerCapture(event.pointerId);
+          return;
+        }
+        // 2. On a shape (top one first): select it and drag to move
+        for (let i = markup.shapes.length - 1; i >= 0; i--) {
+          if (hitShape(markup.shapes[i], p, tol)) {
+            remember();
+            markup.selected = i;
+            markup.action = { kind: 'move', start: p, orig: Object.assign({}, markup.shapes[i]), moved: false };
+            canvas.setPointerCapture(event.pointerId);
+            redrawMarkup();
+            return;
+          }
+        }
+        // 3. Empty spot: deselect, then add text or start a new shape
+        markup.selected = -1;
+        if (markup.tool === 'text') {
+          redrawMarkup();
+          const text = (window.prompt('Text to place on the photo:') || '').trim();
+          if (text) {
+            remember();
+            markup.shapes.push({ type: 'text', color: markup.color, x1: p.x, y1: p.y, x2: p.x, y2: p.y, text, scale: 1 });
+            markup.selected = markup.shapes.length - 1;
+          }
+          redrawMarkup();
+          return;
+        }
+        remember();
+        markup.shapes.push({ type: markup.tool, color: markup.color, x1: p.x, y1: p.y, x2: p.x, y2: p.y, scale: 1 });
+        markup.selected = markup.shapes.length - 1;
+        markup.action = { kind: 'draw' };
+        canvas.setPointerCapture(event.pointerId);
+        redrawMarkup();
+      });
+
+      canvas.addEventListener('pointermove', (event) => {
+        const a = markup.action, sel = markup.shapes[markup.selected];
+        if (!a || !sel) return;
+        event.preventDefault();
+        const p = markupPoint(event);
+        if (a.kind === 'draw') {
+          sel.x2 = p.x;
+          sel.y2 = p.y;
+        } else if (a.kind === 'move') {
+          const dx = p.x - a.start.x, dy = p.y - a.start.y;
+          if (Math.hypot(dx, dy) > 2 * markupPx()) a.moved = true;
+          Object.assign(sel, { x1: a.orig.x1 + dx, y1: a.orig.y1 + dy, x2: a.orig.x2 + dx, y2: a.orig.y2 + dy });
+        } else if (a.kind === 'resize') {
+          if (a.handle === 'p1') Object.assign(sel, { x1: p.x, y1: p.y });
+          else if (a.handle === 'p2') Object.assign(sel, { x2: p.x, y2: p.y });
+          else if (a.handle === 'size') {   // text: drag the corner dot right / left to make it bigger / smaller
+            const w = Math.max(10, p.x - a.orig.x1);
+            sel.scale = Math.max(0.3, Math.min(5, (a.orig.scale || 1) * w / Math.max(10, a.width)));
+          } else {
+            if (a.handle[0] === 't') sel.y1 = p.y; else sel.y2 = p.y;
+            if (a.handle[1] === 'l') sel.x1 = p.x; else sel.x2 = p.x;
+          }
+        }
+        redrawMarkup();
+      });
+
+      const finish = () => {
+        const a = markup.action, sel = markup.shapes[markup.selected];
+        markup.action = null;
+        if (!a || !markup.photo) return;
+        if (a.kind === 'draw' && sel && Math.hypot(sel.x2 - sel.x1, sel.y2 - sel.y1) < 12 * markupPx()) {
+          markup.shapes.splice(markup.selected, 1);   // a tap, not a drag: nothing drawn
+          markup.history.pop();
+          markup.selected = -1;
+        } else if (a.kind === 'move' && !a.moved) {
+          markup.history.pop();                         // just selected it
+        }
+        redrawMarkup();
+      };
+      canvas.addEventListener('pointerup', finish);
+      canvas.addEventListener('pointercancel', finish);
+
+      $('markupSmaller').addEventListener('click', () => resizeSelected(1 / 1.25));
+      $('markupBigger').addEventListener('click', () => resizeSelected(1.25));
+      $('markupDelete').addEventListener('click', () => {
+        if (markup.selected < 0) return;
+        remember();
+        markup.shapes.splice(markup.selected, 1);
+        markup.selected = -1;
+        redrawMarkup();
+      });
+      $('markupEditText').addEventListener('click', () => {
+        const sel = markup.shapes[markup.selected];
+        if (!sel || sel.type !== 'text') return;
+        const text = (window.prompt('Edit the text:', sel.text) || '').trim();
+        if (text && text !== sel.text) { remember(); sel.text = text; redrawMarkup(); }
+      });
+      $('markupUndo').addEventListener('click', () => {
+        if (!markup.history.length) return;
+        markup.shapes = JSON.parse(markup.history.pop());
+        markup.selected = -1;
+        redrawMarkup();
+      });
+      $('markupCancel').addEventListener('click', closeMarkup);
+      $('markupDone').addEventListener('click', () => { markup.selected = -1; saveMarkup(); });
+      window.addEventListener('resize', () => { if (markup.photo) { fitMarkupCanvas(); redrawMarkup(); } });
+    }
+
+    function renderPhotos() {
+      $('photoPreviewGrid').replaceChildren();
+      photos.forEach((photo, index) => {
+        const item = document.createElement('div');
+        const image = document.createElement('img');
+        image.src = photo.dataUrl;
+        image.alt = photo.name;
+        image.className = 'w-full h-24 object-cover rounded-lg border border-gray-200';
+        image.addEventListener('click', () => openMarkup(index));
+        const edit = document.createElement('button');
+        edit.type = 'button';
+        edit.dataset.editPhoto = String(index);
+        edit.className = 'mt-1 mr-2 text-xs text-blue-900 font-bold underline';
+        edit.textContent = photo.shapes && photo.shapes.length ? `✏️ Edit (${photo.shapes.length})` : '✏️ Mark up';
+        edit.setAttribute('aria-label', `Mark up ${photo.name}`);
+        edit.addEventListener('click', () => openMarkup(index));
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.removePhoto = String(index);
+        button.className = 'mt-1 text-xs text-red-700 underline';
+        button.textContent = 'Remove';
+        button.setAttribute('aria-label', `Remove ${photo.name}`);
+        button.addEventListener('click', () => removePhoto(index));
+        item.append(image, edit, button);
+        $('photoPreviewGrid').appendChild(item);
+      });
+    }
+
+    function removePhoto(index) {
+      if (submitting || processingPhotos || !Number.isInteger(index) || index < 0 || index >= photos.length) return;
+      photos.splice(index, 1);
+      if (!photos.length) photoContext = null;
+      renderPhotos();
+      updateControls();
+    }
+
+    async function handlePhotosSelected(event) {
+      const files = Array.from(event.target.files || []);
+      event.target.value = '';
+      if (!files.length || submitting || processingPhotos || loadingProjects) return;
+      let context;
+      try { context = reportContext(); } catch (error) { showStatus(errorMessage(error), 'error'); return; }
+      processingPhotos = true;
+      updateControls();
+      const failures = [];
+      try {
+        // Process sequentially to limit peak memory usage on mobile devices.
+        for (const file of files) {
+          try {
+            photos.push(await watermarkPhoto(file, context));
+            photoContext = context;
+          } catch (error) {
+            failures.push(`${file.name || 'Photo'}: ${errorMessage(error)}`);
+          }
+        }
+        renderPhotos();
+        if (failures.length) showStatus(`Some photos were not attached. ${failures.join(' ')}`, 'error');
+        else showStatus('Photos are ready to submit.');
+      } finally {
+        processingPhotos = false;
+        updateControls();
+      }
+    }
+
+    function reportUrl(response) {
+      if (!response || typeof response.docUrl !== 'string') return null;
+      try {
+        const url = new URL(response.docUrl);
+        if (url.protocol !== 'https:' || url.username || url.password) return null;
+        if (url.hostname !== 'docs.google.com' && url.hostname !== 'drive.google.com') return null;
+        return url.href;
+      } catch (_) { return null; }
+    }
+
+    async function submitFieldData() {
+      if (submitting || loadingProjects) return;
+      if (processingPhotos) { showStatus('Please wait for all photos to finish processing.', 'warning'); return; }
+      let context;
+      try { context = reportContext(); } catch (error) { showStatus(errorMessage(error), 'error'); return; }
+      submitting = true;
+      updateControls();
+      try {
+        // Wait for the speech engine's final words before taking the snapshot.
+        await stopDictation();
+        const notes = $('dailyNotes').value.trim();
+        if (!notes && !photos.length) {
+          showStatus('Please provide observation notes or attach at least one photo.', 'warning');
+          return;
+        }
+        const payload = {
+          date: context.date,
+          project: context.project,
+          notes,
+          photos: photos.map((photo) => photo.dataUrl)
+        };
+        showStatus('Polishing observations and saving your report...');
+        const response = await callServer('submitMobileFieldReport', payload);
+        if (response && (response.success === false || response.error)) {
+          throw new Error(errorMessage(response.error || response.message || 'The server reported that saving failed.'));
+        }
+        const url = reportUrl(response);
+        if (!url) {
+          showStatus('The server responded without a valid Google document link. Your draft has been kept. Check the report in Drive before submitting again.', 'warning');
+          return;
+        }
+        $('dailyNotes').value = '';
+        photos = [];
+        photoContext = null;
+        $('cameraInput').value = '';
+        renderPhotos();
+        hideMentionMenu();
+        if (response.aiFailed) {
+          showStatus('⚠️ Saved, but AI formatting failed – your raw notes are in the draft. Open it and sort them into sections before finalizing.', 'warning');
+        } else {
+          showStatus('✅ Successfully added to the Daily Report!', 'success');
+        }
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.className = 'underline font-bold text-blue-900 mt-1 block';
+        link.textContent = 'Open Google Doc Draft';
+        $('statusMessage').appendChild(link);
+      } catch (error) {
+        showStatus(`Could not confirm saving: ${errorMessage(error)} Your notes and photos have been kept.`, 'error');
+      } finally {
+        submitting = false;
+        updateControls();
+      }
+    }
+
+    function initializeApp() {
+      $('reportDate').value = localDateString();
+      $('reportForm').addEventListener('submit', (event) => { event.preventDefault(); submitFieldData(); });
+      $('micBtn').addEventListener('click', toggleVoiceDictation);
+      $('cameraInput').addEventListener('change', handlePhotosSelected);
+      initMarkupEditor();
+      $('attachBtn').addEventListener('click', () => {
+        try { reportContext(); $('cameraInput').click(); }
+        catch (error) { showStatus(errorMessage(error), 'error'); }
+      });
+      $('retryProjectsBtn').addEventListener('click', loadProjects);
+      window.addEventListener('beforeunload', (event) => {
+        if (submitting || processingPhotos || photos.length || $('dailyNotes').value.trim()) {
+          event.preventDefault();
+          event.returnValue = '';
+        }
+      });
+      updateControls();
+      loadProjects();
+    }
+
+    document.addEventListener('DOMContentLoaded', initializeApp);
+    // =========================================================================
+// @MENTION AUTOCOMPLETE & FIELD DIRECTORY ENGINE
+// =========================================================================
+
+let directoryList = [];
+let activeMentionMatch = null;
+let directoryError = null;
+
+// 1. Fetch directory contacts from Google Sheets
+function loadDirectory() {
+  if (typeof google !== 'undefined' && google.script && google.script.run) {
+    directoryError = null;
+    google.script.run
+      .withSuccessHandler(function(data) {
+        directoryList = data || [];
+      })
+      .withFailureHandler(function(error) {
+        directoryError = errorMessage(error);
+        showStatus(`Contact directory could not be loaded (${directoryError}). @-mentions will offer a retry.`, 'warning');
+      })
+      .getMobileDirectory();
+  }
+}
+
+// 2. Classify contact type (HCAI, Deputy, PM, or Sub)
+// Whole-word matching, so "Equipment" isn't read as "pm" and "pressure testing" subs aren't read as deputies
+function getContactCategory(contact) {
+  const meta = `${contact.name} ${contact.tradeLabel} ${contact.roleDesc} ${contact.aliases}`.toLowerCase();
+  if (/\b(compliance|flso|dse|hcai|oshpd)\b/.test(meta)) return 'hcai';
+  if (/\b(deputy|caltech|special inspect\w*|testing lab|lab testing)\b/.test(meta)) return 'deputy';
+  if (/\b(project manager|pm|project management)\b/.test(meta)) return 'pm';
+  return 'sub';
+}
+
+// 3. Filter directory based on prefix (sub, pm, etc.) and search text
+function filterContacts(category, query = '') {
+  const cleanQuery = query.toLowerCase().trim();
+  return directoryList.filter(item => {
+    const itemCat = getContactCategory(item);
+    if (category && category !== 'all' && itemCat !== category) return false;
+    
+    if (!cleanQuery) return true;
+    const searchable = `${item.name} ${item.tradeLabel} ${item.aliases}`.toLowerCase();
+    return searchable.includes(cleanQuery);
+  });
+}
+
+// 4. Render matching contacts in the floating popover menu
+function showMentionMenu(category, query, matchStartIndex, matchEndIndex) {
+  activeMentionMatch = { startIndex: matchStartIndex, endIndex: matchEndIndex };
+  const matches = filterContacts(category, query);
+  const container = document.getElementById('mentionOptions');
+  const title = document.getElementById('mentionMenuTitle');
+  const menu = document.getElementById('mentionMenu');
+
+  if (!container || !menu) return;
+
+  title.textContent = category === 'all' 
+    ? 'All Directory Contacts' 
+    : `${category.toUpperCase()} Matches ${query ? `("${query}")` : ''}`;
+
+  container.replaceChildren();
+
+  if (directoryError) {
+    const retry = document.createElement('div');
+    retry.className = 'p-3 text-red-700 cursor-pointer underline';
+    retry.textContent = 'Contacts could not be loaded. Tap to retry.';
+    retry.addEventListener('click', () => { hideMentionMenu(); loadDirectory(); });
+    container.appendChild(retry);
+    menu.classList.remove('hidden');
+    return;
+  }
+
+  if (matches.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'p-3 text-gray-500 italic';
+    empty.textContent = 'No matching records found.';
+    container.appendChild(empty);
+    menu.classList.remove('hidden');
+    return;
+  }
+
+  matches.forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'px-3 py-2 cursor-pointer hover:bg-blue-50 flex justify-between items-center';
+
+    // Built with textContent so names like "Smith & Sons" display exactly as typed
+    const left = document.createElement('div');
+    const nameEl = document.createElement('span');
+    nameEl.className = 'font-bold text-gray-900';
+    nameEl.textContent = item.name;
+    left.appendChild(nameEl);
+    if (item.tradeLabel) {
+      const tradeEl = document.createElement('span');
+      tradeEl.className = 'text-gray-500 ml-1';
+      tradeEl.textContent = `(${item.tradeLabel})`;
+      left.appendChild(tradeEl);
+    }
+    row.appendChild(left);
+    if (item.aliases) {
+      const aliasEl = document.createElement('span');
+      aliasEl.className = 'text-gray-400 font-mono';
+      aliasEl.style.fontSize = '10px';
+      aliasEl.textContent = item.aliases;
+      row.appendChild(aliasEl);
+    }
+
+    row.addEventListener('click', () => {
+      insertSelectedContact(item);
+    });
+
+    container.appendChild(row);
+  });
+
+  menu.classList.remove('hidden');
+}
+
+function hideMentionMenu() {
+  const menu = document.getElementById('mentionMenu');
+  if (menu) menu.classList.add('hidden');
+  activeMentionMatch = null;
+}
+
+// 5. Replace the @tag query with formatted "Name (Trade/Role)"
+function insertSelectedContact(contact) {
+  const notes = document.getElementById('dailyNotes');
+  if (!notes) return;
+
+  const currentText = notes.value;
+  const replacement = contact.tradeLabel 
+    ? `${contact.name} (${contact.tradeLabel})` 
+    : contact.name;
+
+  if (activeMentionMatch) {
+    const before = currentText.substring(0, activeMentionMatch.startIndex);
+    const after = currentText.substring(activeMentionMatch.endIndex);
+    notes.value = `${before}${replacement} ${after}`;
+    notes.selectionStart = notes.selectionEnd = before.length + replacement.length + 1;
+  } else {
+    const pos = notes.selectionStart || currentText.length;
+    const before = currentText.substring(0, pos);
+    const after = currentText.substring(pos);
+    notes.value = `${before}${before.length > 0 && !before.endsWith(' ') ? ' ' : ''}${replacement} ${after}`;
+  }
+
+  hideMentionMenu();
+  notes.focus();
+}
+
+// 6. Connect typing watcher and quick buttons
+function setupMentionListeners() {
+  const notes = document.getElementById('dailyNotes');
+  if (!notes) return;
+
+  notes.addEventListener('input', function() {
+    const cursor = this.selectionStart;
+    const textBeforeCursor = this.value.substring(0, cursor);
+
+    // Matches @sub, @sub elect, @pm fritz, etc.
+    const tagMatch = textBeforeCursor.match(/@(pm|sub|deputy|hcai)(?:\s+([a-zA-Z0-9_\-\/]+))?$/i);
+    if (tagMatch) {
+      const fullTag = tagMatch[0];
+      const category = tagMatch[1].toLowerCase();
+      const query = tagMatch[2] || '';
+      const startIndex = cursor - fullTag.length;
+      showMentionMenu(category, query, startIndex, cursor);
+      return;
+    }
+
+    // Matches standalone "@"
+    const generalMatch = textBeforeCursor.match(/@([a-zA-Z0-9_\-\/]*)$/);
+    if (generalMatch) {
+      const fullTag = generalMatch[0];
+      const query = generalMatch[1] || '';
+      showMentionMenu('all', query, cursor - fullTag.length, cursor);
+      return;
+    }
+
+    hideMentionMenu();
+  });
+
+  notes.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') hideMentionMenu();
+  });
+
+  // Close the menu when tapping anywhere outside it (phones have no Esc key)
+  document.addEventListener('click', function(e) {
+    if (!e.target.closest('#mentionMenu, #dailyNotes, #addPmBtn, #addSubBtn, #addDeputyBtn, #addHcaiBtn')) {
+      hideMentionMenu();
+    }
+  });
+
+  const btnPm = document.getElementById('addPmBtn');
+  const btnSub = document.getElementById('addSubBtn');
+  const btnDep = document.getElementById('addDeputyBtn');
+  const btnHcai = document.getElementById('addHcaiBtn');
+
+  if (btnPm) btnPm.addEventListener('click', () => showMentionMenu('pm', '', notes.selectionStart, notes.selectionStart));
+  if (btnSub) btnSub.addEventListener('click', () => showMentionMenu('sub', '', notes.selectionStart, notes.selectionStart));
+  if (btnDep) btnDep.addEventListener('click', () => showMentionMenu('deputy', '', notes.selectionStart, notes.selectionStart));
+  if (btnHcai) btnHcai.addEventListener('click', () => showMentionMenu('hcai', '', notes.selectionStart, notes.selectionStart));
+}
+
+// 7. Auto-start: Runs automatically once page elements load
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', function() {
+    loadDirectory();
+    setupMentionListeners();
+  });
+} else {
+  loadDirectory();
+  setupMentionListeners();
+}
+  </script>
+</body>
+</html>
