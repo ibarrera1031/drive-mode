@@ -76,7 +76,7 @@ const LOG_KEY = 'driveLogPending';
 function status(text, detail) { $('status').textContent = text; if (detail !== undefined) $('detail').textContent = detail; }
 function chips() {
   $('dateChip').textContent = STATE.dateSpoken || '—';
-  $('projChip').textContent = STATE.project ? `${STATE.project.number} – ${STATE.project.calName || STATE.project.name}` : '—';
+  $('projChip').textContent = STATE.project ? `${STATE.project.number} – ${projName(STATE.project)}` : '—';
 }
 
 // ---------- transcript: on screen, kept in the phone until the Sheet has it ----------
@@ -123,7 +123,10 @@ Voice commands he can say at any time:
 - "go back": return to the previous step.
 
 Step 1 - Date: ask "What date is this report for?" Turn answers like "today", "yesterday" or "last Tuesday" into a date and call set_report_date with it as YYYY-MM-DD. Say the date back with the weekday and ask him to confirm. If he says no, ask again.
-Step 2 - Project: ask "Which project?" Call find_project with what he said (pass a project number as digits). If there is one clear match, ask "Is that <name>?" If there are several, read up to three names and ask which one. If none, ask him to say the name or the number again. When he confirms, call confirm_project with that project's number.
+Step 2 - Project: ask "Which project?" Call find_project with what he said (pass a project number as digits). If there is one clear match, ask "Is that <name>?" If there are several, read up to three names and ask which one. If none, look in his project list below yourself for the closest one (he may use a nickname, e.g. "WiFi phase 2" is "WiFi Ph 2"). If you still can't tell, ask him to say the name or the number again. When he confirms, call confirm_project with that project's number.
+
+His active projects (number - name):
+${INIT.projects.map(p => `${p.number} - ${p.calName && p.calName !== p.number ? p.calName + ' (' + p.name + ')' : p.name}`).join('\n')}
 Step 3 - this is a test version with only the first two steps: say "Date and project are set. That's all for this test. Say stop when you're done." Then wait quietly. Do not ask about anything else and do not invent report content.`;
 }
 
@@ -138,22 +141,50 @@ const TOOLS = [{ functionDeclarations: [
 ] }];
 
 // ---------- the tools (run on the phone; nothing is written to the report in this stage) ----------
-const DIGIT_WORDS = { zero: '0', oh: '0', o: '0', one: '1', two: '2', to: '2', too: '2', three: '3', four: '4', for: '4', five: '5',
-  six: '6', seven: '7', eight: '8', ate: '8', nine: '9' };
+// Spoken words -> search words: "Wi-Fi phase two" -> wifi, ph, 2; "two forty one" -> 2, 41; "Phase II" -> ph, 2
+const ONES = { zero: 0, oh: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
+  twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const ROMAN = { ii: '2', iii: '3' };   // not iv: "Pharmacy IV" is intravenous
+function searchWords(text) {
+  const raw = String(text || '').toLowerCase().replace(/([a-z0-9])[-.'](?=[a-z0-9])/g, '$1').split(/[^a-z0-9]+/).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < raw.length; i++) {
+    const w = raw[i];
+    if (w in TENS) { let v = TENS[w]; if (ONES[raw[i + 1]] > 0 && ONES[raw[i + 1]] < 10) v += ONES[raw[++i]]; out.push(String(v)); }
+    else if (w in ONES) out.push(String(ONES[w]));
+    else out.push(w === 'phase' ? 'ph' : ROMAN[w] || w);
+  }
+  return out;
+}
+// The longest run of digits said in a row ("s 2 4 1 0 4 6", "S-241046", "two forty one zero forty six")
+function spokenDigits(words) {
+  let best = '', run = '';
+  words.forEach(w => {
+    if (/^\d+$/.test(w)) { run += w; } else { (w.match(/\d+/g) || []).forEach(d => { if (d.length > best.length) best = d; }); run = ''; }
+    if (run.length > best.length) best = run;
+  });
+  return best;
+}
+// The short name to say: the calendar name, unless that is just the number (no nickname set)
+function projName(p) { return p.calName && p.calName !== p.number ? p.calName : p.name; }
+const STOP = /^(the|project|job|for|and|at|of|on|in|to|hospital|huntington|building|bldg|s|number|is|it|its|um|uh)$/;
 function findProjects(query) {
-  const q = String(query || '').toLowerCase();
-  const words = q.split(/[^a-z0-9]+/).filter(Boolean);
-  // "s two four one six four three" -> "241643"
-  const digits = words.map(w => /^\d+$/.test(w) ? w : (DIGIT_WORDS[w] || ' ')).join('').split(' ').sort((a, b) => b.length - a.length)[0] || '';
-  const stop = /^(the|project|job|one|for|and|at|of|on|hospital|huntington|building|bldg|s)$/;
+  const words = searchWords(query), digits = spokenDigits(words);
+  const text = words.filter(w => !/^\d+$/.test(w) && w.length > 1 && !STOP.test(w));
   return INIT.projects.map(p => {
-    const hay = `${p.name} ${p.calName} ${p.location}`.toLowerCase();
+    const hayWords = searchWords(`${p.name} ${p.calName} ${p.location}`), hay = hayWords.join('');
     let score = 0;
-    if (digits.length >= 3 && p.number.replace(/\D/g, '').indexOf(digits) !== -1) score += 3 + digits.length;
-    words.filter(w => w.length > 2 && !stop.test(w)).forEach(w => { if (hay.indexOf(w.replace(/s$/, '')) !== -1) score += 2; });
+    if (digits.length >= 3 && p.number.replace(/\D/g, '').indexOf(digits) !== -1) score += 10 + digits.length;
+    text.forEach((w, i) => {
+      if (hay.indexOf(w) !== -1 || (w.length > 4 && /s$/.test(w) && hay.indexOf(w.slice(0, -1)) !== -1)) score += w.length > 2 ? 2 : 1;   // elevators -> elevator
+      if (i && hay.indexOf(text[i - 1] + w) !== -1) score += 3;   // "wi" "fi" -> wifi
+    });
+    // "phase 2": a small number counts only next to a name match, once
+    if (score) words.filter((w, i, a) => /^\d{1,2}$/.test(w) && a.indexOf(w) === i).forEach(n => { if (hayWords.indexOf(n) !== -1) score += 1; });
     return { p, score };
-  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3)
-    .map(x => ({ number: x.p.number, name: x.p.calName || x.p.name, fullName: x.p.name }));
+  }).filter(x => x.score > 1).sort((a, b) => b.score - a.score).slice(0, 4)
+    .map(x => ({ number: x.p.number, name: projName(x.p), fullName: x.p.name }));
 }
 
 function runTool(name, args) {
@@ -176,8 +207,8 @@ function runTool(name, args) {
     const n = String(args.number || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
     const p = INIT.projects.find(x => x.number.toUpperCase() === n);
     if (!p) return { ok: false, error: 'That number is not one of the active projects. Search again.' };
-    STATE.project = p; chips(); log('App', `Project set: ${p.number} ${p.calName || p.name}`);
-    return { ok: true, number: p.number, name: p.calName || p.name };
+    STATE.project = p; chips(); log('App', `Project set: ${p.number} ${projName(p)}`);
+    return { ok: true, number: p.number, name: projName(p) };
   }
   if (name === 'end_interview') {
     // let the goodbye finish playing first
@@ -288,7 +319,7 @@ function onMessage(m, resuming) {
     if (resuming) { log('App', 'Reconnected.'); return; }
     // A new session (first start, or the old one couldn't be resumed): tell Gemini what is already set
     const known = [STATE.date ? `the date is set to ${STATE.dateSpoken} (${STATE.date})` : '',
-      STATE.project ? `the project is set to ${STATE.project.number} ${STATE.project.calName || STATE.project.name}` : ''].filter(Boolean);
+      STATE.project ? `the project is set to ${STATE.project.number} ${projName(STATE.project)}` : ''].filter(Boolean);
     const text = known.length ? `We were cut off. Already done: ${known.join(' and ')}. Briefly say you're back and continue from the next step.`
       : 'Start the interview.';
     send({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } });
