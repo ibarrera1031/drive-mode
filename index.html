@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Drive Mode – Inspect Tech</title>
+  <style>
+    :root { --bg: #0b1220; --card: #141d30; --text: #f1f5f9; --muted: #94a3b8; --go: #16a34a; --stop: #dc2626; --accent: #38bdf8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent; }
+    main { max-width: 640px; margin: 0 auto; padding: 16px; min-height: 100vh; display: flex; flex-direction: column; gap: 16px; }
+    h1 { font-size: 20px; margin: 4px 0 0; color: var(--muted); font-weight: 600; letter-spacing: .5px; }
+    #status { font-size: 30px; font-weight: 700; text-align: center; min-height: 80px; display: flex; align-items: center; justify-content: center; }
+    #detail { font-size: 15px; color: var(--muted); text-align: center; min-height: 20px; }
+    .big { width: 100%; border: 0; border-radius: 24px; color: #fff; font-size: 40px; font-weight: 800; padding: 0;
+      height: 34vh; min-height: 180px; }
+    .big:active { filter: brightness(1.2); }
+    #startBtn { background: var(--go); }
+    #stopBtn { background: var(--stop); }
+    .chips { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .chip { background: var(--card); border-radius: 14px; padding: 12px; }
+    .chip b { display: block; font-size: 12px; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+    .chip span { font-size: 17px; font-weight: 600; }
+    details { background: var(--card); border-radius: 14px; padding: 10px 12px; }
+    summary { color: var(--muted); font-size: 14px; }
+    #log { font-size: 14px; line-height: 1.45; max-height: 40vh; overflow-y: auto; margin-top: 8px; }
+    #log div { margin: 4px 0; }
+    #log .Ivan b { color: var(--accent); }
+    #log .App { color: var(--muted); font-style: italic; }
+    .hidden { display: none !important; }
+    .err { color: #fca5a5; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>🚗 DRIVE MODE</h1>
+  <div id="status">Loading…</div>
+  <div id="detail"></div>
+  <button id="startBtn" class="big" type="button" disabled>START</button>
+  <button id="stopBtn" class="big hidden" type="button">STOP</button>
+  <div class="chips">
+    <div class="chip"><b>Date</b><span id="dateChip">—</span></div>
+    <div class="chip"><b>Project</b><span id="projChip">—</span></div>
+  </div>
+  <a id="openHosted" class="big hidden" target="_top"
+    style="display:flex;align-items:center;justify-content:center;background:#2563eb;text-decoration:none;text-align:center">OPEN DRIVE MODE</a>
+  <details><summary>Transcript (saved to the Drive Mode Log tab)</summary><div id="log"></div></details>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let INIT = null, KEY = '';   // KEY: the private key from the Drive Mode link (k=…)
+// Hosted outside Apps Script (the iPhone allows the microphone only there): the link carries #api=<web app>&k=<key>
+// and the server calls go to the web app's doPost. Inside Apps Script: google.script.run.
+const OUTSIDE = typeof google === 'undefined' || !google.script;
+const HASH = new URLSearchParams(location.hash.replace(/^#/, ''));
+const API = HASH.get('api') || '';
+function call(fn, ...args) {
+  if (!OUTSIDE) return new Promise((res, rej) => google.script.run.withSuccessHandler(res).withFailureHandler(rej)[fn](...args));
+  if (!API) return Promise.reject(new Error('This link is missing the script address. Use the Drive Mode link from myAppLinks.'));
+  // text/plain body, no custom headers: the browser sends it straight to Apps Script without a CORS check first
+  return fetch(API, { method: 'POST', body: JSON.stringify({ fn, args }) })
+    .then(r => r.json()).then(j => { if (!j.ok) throw new Error(j.error); return j.result; });
+}
+// Interview state (also what a reconnect tells Gemini if the session can't be resumed)
+const STATE = { date: '', dateSpoken: '', project: null };
+let ws = null, running = false, setupDone = false, resumeHandle = '', reconnecting = false;
+let ctx = null, micStream = null, micNode = null, nextPlay = 0, playing = [], wakeLock = null;
+let userText = '', botText = '';
+const SESSION = new Date().toISOString().replace(/[-:]/g, '').substring(0, 15);
+const LOG_KEY = 'driveLogPending';
+
+// ---------- screen ----------
+function status(text, detail) { $('status').textContent = text; if (detail !== undefined) $('detail').textContent = detail; }
+function chips() {
+  $('dateChip').textContent = STATE.dateSpoken || '—';
+  $('projChip').textContent = STATE.project ? `${STATE.project.number} – ${STATE.project.calName || STATE.project.name}` : '—';
+}
+
+// ---------- transcript: on screen, kept in the phone until the Sheet has it ----------
+function pending() { try { return JSON.parse(localStorage.getItem(LOG_KEY) || '[]'); } catch (e) { return []; } }
+function setPending(l) { try { localStorage.setItem(LOG_KEY, JSON.stringify(l)); } catch (e) {} }
+function log(who, text) {
+  text = String(text || '').trim();
+  if (!text) return;
+  const line = { s: SESSION, t: new Date().toISOString(), who, text };
+  const d = document.createElement('div');
+  d.className = who;
+  d.innerHTML = `<b></b> `; d.firstChild.textContent = who + ':'; d.appendChild(document.createTextNode(text));
+  $('log').appendChild(d); $('log').scrollTop = $('log').scrollHeight;
+  setPending(pending().concat([line]));
+}
+let flushing = false;
+function flushLog() {
+  const lines = pending();
+  if (flushing || !lines.length || !navigator.onLine) return;
+  flushing = true;
+  // Lines from an earlier session that never reached the Sheet go up under their own session id
+  const bySession = {};
+  lines.forEach(l => { (bySession[l.s] = bySession[l.s] || []).push(l); });
+  const ids = Object.keys(bySession);
+  let left = ids.length;
+  const done = () => { if (--left === 0) flushing = false; };
+  ids.forEach(id => call('driveSaveLog', KEY, id, bySession[id])
+    .then(() => { const sent = bySession[id]; setPending(pending().filter(l => !sent.some(x => x.t === l.t && x.who === l.who && x.s === l.s))); done(); })
+    .catch(done));
+}
+setInterval(flushLog, 15000);
+window.addEventListener('online', flushLog);
+
+// ---------- what Gemini is told ----------
+function systemText() {
+  return `You are the hands-free report assistant for Ivan, a California HCAI Inspector of Record (IOR), while he is driving.
+He cannot look at or touch the phone. Speak English. Ask short, clear questions, one at a time, and keep every reply to one or two short sentences.
+Today is ${INIT.todaySpoken}.
+
+Voice commands he can say at any time:
+- "stop": say a very short goodbye, then call end_interview.
+- "repeat": repeat your last question.
+- "skip": move on to the next step.
+- "go back": return to the previous step.
+
+Step 1 - Date: ask "What date is this report for?" Turn answers like "today", "yesterday" or "last Tuesday" into a date and call set_report_date with it as YYYY-MM-DD. Say the date back with the weekday and ask him to confirm. If he says no, ask again.
+Step 2 - Project: ask "Which project?" Call find_project with what he said (pass a project number as digits). If there is one clear match, ask "Is that <name>?" If there are several, read up to three names and ask which one. If none, ask him to say the name or the number again. When he confirms, call confirm_project with that project's number.
+Step 3 - this is a test version with only the first two steps: say "Date and project are set. That's all for this test. Say stop when you're done." Then wait quietly. Do not ask about anything else and do not invent report content.`;
+}
+
+const TOOLS = [{ functionDeclarations: [
+  { name: 'set_report_date', description: 'Set the date of the daily report Ivan is reporting on.',
+    parameters: { type: 'OBJECT', properties: { date: { type: 'STRING', description: 'YYYY-MM-DD' } }, required: ['date'] } },
+  { name: 'find_project', description: 'Find Ivan\'s active projects that match what he said (name, nickname or project number).',
+    parameters: { type: 'OBJECT', properties: { query: { type: 'STRING', description: 'What Ivan said, numbers as digits' } }, required: ['query'] } },
+  { name: 'confirm_project', description: 'Set the project once Ivan has confirmed it.',
+    parameters: { type: 'OBJECT', properties: { number: { type: 'STRING', description: 'Project number, e.g. S241643' } }, required: ['number'] } },
+  { name: 'end_interview', description: 'End the session when Ivan says stop.', parameters: { type: 'OBJECT', properties: {} } }
+] }];
+
+// ---------- the tools (run on the phone; nothing is written to the report in this stage) ----------
+const DIGIT_WORDS = { zero: '0', oh: '0', o: '0', one: '1', two: '2', to: '2', too: '2', three: '3', four: '4', for: '4', five: '5',
+  six: '6', seven: '7', eight: '8', ate: '8', nine: '9' };
+function findProjects(query) {
+  const q = String(query || '').toLowerCase();
+  const words = q.split(/[^a-z0-9]+/).filter(Boolean);
+  // "s two four one six four three" -> "241643"
+  const digits = words.map(w => /^\d+$/.test(w) ? w : (DIGIT_WORDS[w] || ' ')).join('').split(' ').sort((a, b) => b.length - a.length)[0] || '';
+  const stop = /^(the|project|job|one|for|and|at|of|on|hospital|huntington|building|bldg|s)$/;
+  return INIT.projects.map(p => {
+    const hay = `${p.name} ${p.calName} ${p.location}`.toLowerCase();
+    let score = 0;
+    if (digits.length >= 3 && p.number.replace(/\D/g, '').indexOf(digits) !== -1) score += 3 + digits.length;
+    words.filter(w => w.length > 2 && !stop.test(w)).forEach(w => { if (hay.indexOf(w.replace(/s$/, '')) !== -1) score += 2; });
+    return { p, score };
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 3)
+    .map(x => ({ number: x.p.number, name: x.p.calName || x.p.name, fullName: x.p.name }));
+}
+
+function runTool(name, args) {
+  args = args || {};
+  if (name === 'set_report_date') {
+    const m = String(args.date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const d = m && new Date(+m[1], +m[2] - 1, +m[3], 12);
+    if (!d || isNaN(d)) return { ok: false, error: 'Not a valid date. Ask again.' };
+    STATE.date = args.date;
+    STATE.dateSpoken = d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    chips(); log('App', `Date set: ${STATE.dateSpoken}`);
+    return { ok: true, date: STATE.date, say: STATE.dateSpoken };
+  }
+  if (name === 'find_project') {
+    const matches = findProjects(args.query);
+    log('App', `Project search "${args.query}": ${matches.map(m => m.number + ' ' + m.name).join('; ') || 'no match'}`);
+    return matches.length ? { matches } : { matches: [], hint: 'No project matched. Ask him to say the project name or number again.' };
+  }
+  if (name === 'confirm_project') {
+    const n = String(args.number || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const p = INIT.projects.find(x => x.number.toUpperCase() === n);
+    if (!p) return { ok: false, error: 'That number is not one of the active projects. Search again.' };
+    STATE.project = p; chips(); log('App', `Project set: ${p.number} ${p.calName || p.name}`);
+    return { ok: true, number: p.number, name: p.calName || p.name };
+  }
+  if (name === 'end_interview') {
+    // let the goodbye finish playing first
+    setTimeout(() => stop('Stopped by voice.'), Math.max(0, (nextPlay - (ctx ? ctx.currentTime : 0)) * 1000) + 600);
+    return { ok: true };
+  }
+  return { ok: false, error: 'Unknown tool' };
+}
+
+// ---------- audio ----------
+function toBase64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+// Microphone samples (phone rate, e.g. 48 kHz) -> 16 kHz 16-bit PCM, which is what Gemini Live expects
+function to16k(input, rate) {
+  const ratio = rate / 16000, n = Math.floor(input.length / ratio), out = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(input.length, Math.floor((i + 1) * ratio));
+    let sum = 0; for (let j = a; j < b; j++) sum += input[j];
+    const v = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
+    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  return out;
+}
+async function startMic() {
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+  const src = ctx.createMediaStreamSource(micStream);
+  micNode = ctx.createScriptProcessor(4096, 1, 1);
+  micNode.onaudioprocess = e => {
+    if (!ws || ws.readyState !== 1 || !setupDone) return;
+    const pcm = to16k(e.inputBuffer.getChannelData(0), ctx.sampleRate);
+    send({ realtimeInput: { audio: { data: toBase64(new Uint8Array(pcm.buffer)), mimeType: 'audio/pcm;rate=16000' } } });
+  };
+  src.connect(micNode); micNode.connect(ctx.destination);   // the node outputs silence; it only needs to be connected to run
+}
+// Gemini's voice comes back as 24 kHz 16-bit PCM chunks, played one after the other
+function playChunk(b64) {
+  const bin = atob(b64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const pcm = new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+  if (!pcm.length) return;
+  const buf = ctx.createBuffer(1, pcm.length, 24000), ch = buf.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 0x8000;
+  const s = ctx.createBufferSource(); s.buffer = buf; s.connect(ctx.destination);
+  const at = Math.max(ctx.currentTime + 0.05, nextPlay);
+  s.start(at); nextPlay = at + buf.duration;
+  playing.push(s); s.onended = () => { playing = playing.filter(x => x !== s); if (!playing.length && running) status('Listening…'); };
+  status('Speaking…');
+}
+function stopPlayback() { playing.forEach(s => { try { s.stop(); } catch (e) {} }); playing = []; nextPlay = 0; }
+
+// ---------- Gemini Live connection ----------
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+function getToken() { return call('driveLiveToken', KEY); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let everConnected = false, failures = 0;
+async function connect() {
+  const token = await getToken();
+  setupDone = false;
+  const resuming = !!resumeHandle;
+  const sock = new WebSocket('wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=' + encodeURIComponent(token));
+  ws = sock;
+  sock.binaryType = 'arraybuffer';
+  sock.onopen = () => send({ setup: {
+    model: INIT.model,
+    generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: INIT.voice } } } },
+    systemInstruction: { parts: [{ text: systemText() }] },
+    tools: TOOLS,
+    inputAudioTranscription: {}, outputAudioTranscription: {},
+    sessionResumption: resuming ? { handle: resumeHandle } : {},
+    contextWindowCompression: { slidingWindow: {} }
+  } });
+  sock.onmessage = ev => { if (sock === ws) onMessage(JSON.parse(typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data)), resuming); };
+  sock.onclose = ev => {
+    if (sock !== ws) return;   // an old connection we already replaced
+    ws = null;
+    if (!running) return;
+    const why = `${ev.code}${ev.reason ? ': ' + ev.reason : ''}`;
+    log('App', `Connection closed (${why}).`);
+    // Never connected at all (bad model name, key, billing): stop and show Gemini's reason
+    if (!everConnected) return stop(`Could not start the voice session (${why}).`, true);
+    if (!setupDone && resuming) resumeHandle = '';   // the old session can't be resumed: start a new one with what we have
+    failures++;
+    reconnect();
+  };
+}
+async function reconnect() {
+  if (reconnecting || !running) return;
+  reconnecting = true;
+  status('Reconnecting…', 'Signal dropped or the session timed out. Keep driving.');
+  const old = ws; ws = null;
+  if (old) { try { old.close(); } catch (e) {} }
+  flushTurn();
+  if (failures > 1) await sleep(3000);
+  while (running && failures < 40) {
+    try { await connect(); break; }
+    catch (e) { failures++; await sleep(3000); }   // offline: the token request fails until the signal is back
+  }
+  reconnecting = false;
+  if (running && failures >= 40) stop('Could not reconnect. The transcript so far is saved on this phone.', true);
+}
+function onMessage(m, resuming) {
+  if (m.setupComplete) {
+    setupDone = true; everConnected = true; failures = 0;
+    status('Listening…', '');
+    if (resuming) { log('App', 'Reconnected.'); return; }
+    // A new session (first start, or the old one couldn't be resumed): tell Gemini what is already set
+    const known = [STATE.date ? `the date is set to ${STATE.dateSpoken} (${STATE.date})` : '',
+      STATE.project ? `the project is set to ${STATE.project.number} ${STATE.project.calName || STATE.project.name}` : ''].filter(Boolean);
+    const text = known.length ? `We were cut off. Already done: ${known.join(' and ')}. Briefly say you're back and continue from the next step.`
+      : 'Start the interview.';
+    send({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } });
+    return;
+  }
+  if (m.sessionResumptionUpdate) { if (m.sessionResumptionUpdate.resumable && m.sessionResumptionUpdate.newHandle) resumeHandle = m.sessionResumptionUpdate.newHandle; return; }
+  if (m.goAway) { reconnect(); return; }
+  if (m.toolCall) {
+    flushTurn();
+    const functionResponses = (m.toolCall.functionCalls || []).map(fc => ({ id: fc.id, name: fc.name, response: runTool(fc.name, fc.args) }));
+    send({ toolResponse: { functionResponses } });
+    return;
+  }
+  const sc = m.serverContent;
+  if (!sc) return;
+  if (sc.inputTranscription && sc.inputTranscription.text) userText += sc.inputTranscription.text;
+  if (sc.outputTranscription && sc.outputTranscription.text) { if (userText) flushUser(); botText += sc.outputTranscription.text; }
+  ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || 'audio')) playChunk(p.inlineData.data); });
+  if (sc.interrupted) { stopPlayback(); flushTurn(); status('Listening…'); }
+  if (sc.turnComplete) flushTurn();
+}
+function flushUser() { log('Ivan', userText); userText = ''; }
+function flushTurn() { if (userText) flushUser(); if (botText) { log('Assistant', botText); botText = ''; } }
+
+// ---------- start / stop ----------
+async function start() {
+  $('startBtn').classList.add('hidden'); $('stopBtn').classList.remove('hidden');
+  status('Starting…', 'Allow the microphone if the phone asks.');
+  try {
+    running = true; resumeHandle = ''; everConnected = false; failures = 0;
+    // Create and wake the audio right at the tap, before anything waits (iPhones only allow it there)
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    ctx.resume().catch(() => {});
+    await startMic();
+    // Keep the screen on (not waited for: it can hang on a permission prompt)
+    try { if (navigator.wakeLock) navigator.wakeLock.request('screen').then(l => { wakeLock = l; }).catch(() => {}); } catch (e) {}
+    log('App', 'Drive Mode started.');
+    await connect();
+  } catch (e) {
+    const blocked = e && e.name === 'NotAllowedError';
+    stop(!blocked ? 'Could not start: ' + (e && e.message || e)
+      : OUTSIDE ? 'The microphone is blocked. iPhone: Settings → Apps → Safari (or Chrome) → Microphone → Allow, then reload this page.'
+      : 'iPhones block the microphone inside Apps Script pages. Open the Drive Mode link from myAppLinks instead.', true);
+  }
+}
+function stop(why, isError) {
+  running = false; setupDone = false;
+  flushTurn();
+  const old = ws; ws = null;
+  if (old) { try { if (old.readyState === 1) old.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } })); old.close(); } catch (e) {} }
+  stopPlayback();
+  if (micNode) { try { micNode.disconnect(); } catch (e) {} micNode = null; }
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (ctx) { try { ctx.close(); } catch (e) {} ctx = null; }
+  if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+  log('App', why || 'Stopped.');
+  flushLog();
+  status(isError ? 'Stopped' : 'Done', why || '');
+  $('detail').className = isError ? 'err' : '';
+  $('stopBtn').classList.add('hidden'); $('startBtn').classList.remove('hidden');
+}
+$('startBtn').onclick = start;
+$('stopBtn').onclick = () => stop('Stopped.');
+
+function load() {
+  call('driveInit', KEY).then(init => {
+    INIT = init;
+    // Inside Apps Script the iPhone blocks the microphone: send Ivan to the hosted page instead
+    if (!OUTSIDE && init.hostedLink && /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+      status('Open Drive Mode', 'This Google page can\'t use the iPhone microphone. Tap below to open Drive Mode.');
+      $('startBtn').classList.add('hidden');
+      $('openHosted').href = init.hostedLink; $('openHosted').classList.remove('hidden');
+      return;
+    }
+    status('Ready', `${init.projects.length} active projects loaded. Tap START, then just talk.`);
+    $('startBtn').disabled = false;
+    flushLog();   // transcript lines from a session that ended offline
+  }).catch(e => { status('Could not load', e.message); $('detail').className = 'err'; });
+}
+if (OUTSIDE) { KEY = HASH.get('k') || ''; load(); }
+else google.script.url.getLocation(loc => { KEY = (loc.parameter && loc.parameter.k) || ''; load(); });
+</script>
+</body>
+</html>
