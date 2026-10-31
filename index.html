@@ -51,7 +51,7 @@
       <option value="Kore">Kore – firm</option>
       <option value="Aoede">Aoede – breezy</option>
       <option value="Leda">Leda – youthful</option>
-      <option value="Zephyr">Zephyr – bright</option>
+      <option value="Zephyr" selected>Zephyr – bright</option>
       <option value="Sulafat">Sulafat – warm</option>
       <option value="Gacrux">Gacrux – mature</option>
       <option value="Puck">Puck – upbeat</option>
@@ -400,7 +400,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let everConnected = false, failures = 0, sessionVoice = '';
 // The voice he picked stays on this phone
 try { const v = localStorage.getItem('driveVoice'); if (v) $('voice').value = v; } catch (e) {}
-if (!$('voice').value) $('voice').selectedIndex = 0;   // a saved voice no longer on the list
+if (!$('voice').value) $('voice').value = 'Zephyr';   // a saved voice no longer on the list
 $('voice').onchange = () => { try { localStorage.setItem('driveVoice', $('voice').value); } catch (e) {} };
 async function connect() {
   const token = await getToken();
