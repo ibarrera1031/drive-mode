@@ -46,6 +46,7 @@
   </div>
   <a id="openHosted" class="big hidden" target="_top"
     style="display:flex;align-items:center;justify-content:center;background:#2563eb;text-decoration:none;text-align:center">OPEN DRIVE MODE</a>
+  <details><summary>Answers so far</summary><div id="answers" style="font-size:14px;line-height:1.45;margin-top:8px"></div></details>
   <details><summary>Transcript (saved to the Drive Mode Log tab)</summary><div id="log"></div></details>
 </main>
 
@@ -65,7 +66,7 @@ function call(fn, ...args) {
     .then(r => r.json()).then(j => { if (!j.ok) throw new Error(j.error); return j.result; });
 }
 // Interview state (also what a reconnect tells Gemini if the session can't be resumed)
-const STATE = { date: '', dateSpoken: '', project: null, report: null };
+const STATE = { date: '', dateSpoken: '', project: null, report: null, forGemini: null, answers: {} };
 let ws = null, running = false, setupDone = false, resumeHandle = '', reconnecting = false;
 let ctx = null, micStream = null, micNode = null, nextPlay = 0, playing = [], wakeLock = null;
 let userText = '', botText = '';
@@ -114,6 +115,7 @@ window.addEventListener('online', flushLog);
 function systemText() {
   return `You are the hands-free report assistant for Ivan, a California HCAI Inspector of Record (IOR), while he is driving.
 He cannot look at or touch the phone. Speak English. Ask short, clear questions, one at a time, and keep every reply to one or two short sentences.
+After asking a question, stop and wait for him to answer. Never answer for him, and never call a tool based on a guess. Call set_report_date only after he has said a date, find_project only with words he actually said, and confirm_project only after he has said yes to that project.
 Today is ${INIT.todaySpoken}.
 
 Voice commands he can say at any time:
@@ -128,14 +130,26 @@ Step 2 - Project: ask "Which project?" Call find_project with what he said (pass
 His active projects (number - name):
 ${INIT.projects.map(p => `${p.number} - ${p.calName && p.calName !== p.number ? p.calName + ' (' + p.name + ')' : p.name}`).join('\n')}
 
-Step 3 - Read-back: confirm_project returns what the report already has. Read it back briefly as natural speech, at most about eight short sentences, in this order:
-  a) Site activity: the subcontractors in that day's draft; if the draft has none, the subcontractors from the last report, and say that report's date.
-  b) Inspections: the inspection requests for that day, saying which ones are deputy inspections, plus any inspection text already in the draft. Give the IR number and the type; don't read descriptions word for word.
-  c) Anything else already in the draft (HCAI visit, meetings, deficiencies), in a few words.
-  If there is no draft yet for that day, say so. Skip anything that is empty. Never add anything that is not in the data.
-Step 4 - this test version stops here: say "That's what the report has so far. This test stops here. Say repeat to hear it again, or stop." If he says repeat, read it back again. Do not ask about anything else yet.`;
+Rules for the rest of the interview:
+- Before each section, briefly read back what the report already has for it, so he only fills the gaps. Skip anything empty. Give an IR number and type; never read descriptions word for word.
+- Ask one question at a time. Let him answer freely, and ask a short follow-up only if something is unclear or missing.
+- Record only what he says, in his own words. Don't reword it or add anything: "Meadows Mechanical is gone" stays "Meadows Mechanical is gone". Never invent names, locations, results or plan references.
+- Call save_section right after each answer, before asking the next question. It replaces that section, so send every line for it each time, earlier ones included.
+- "skip" moves on without saving. "go back" returns to the previous step; correct it with save_section.
+- Don't say tool names or section keys out loud. If you've lost the report data, call get_report.
+
+Step 3 - Field activity: confirm_project returned the report data. Read back the subcontractors in that day's draft; if it has none, read those from the last report and say that report's date. Ask "What's changed since then: new crews, crews gone, or updates to their work?" Save to siteActivity. If nothing changed, save "No change from the report of <that date>."
+Step 4 - Field inspections: read back the IOR inspection requests for that day and any inspection text already in the draft. Ask what actually took place and where, one inspection at a time. If he doesn't say where, ask. Save to fieldInspection, one line per inspection starting "IR# <number> - ". If there are no IOR inspection requests, ask whether he did any field inspections.
+Step 5 - Deputy inspector: for each deputy inspection request that day, ask who covered it. If the name sounds like one in knownDeputies, even if he only gives part of it, use the full name as spelled there without asking. If it is a new name, spell it back letter by letter and wait for his answer; only after he confirms, call remember_deputy. Save to deputyCoverage, one line each, like "IR# 21 - Deputy Inspector Steve Smith was on site." Don't ask for other deputy details; those come later from the deputy's own report.
+Then, whether or not there were deputy inspections, ask "Did the contractor add any inspection requests that same day?" For each one get the IR number, who covered it and what it was for. Save to sameDayInspections, like "Added inspection request number 21, submitted today by the contractor, covered by John Smith, for fire stopping."
+Step 6 - Additional activity: ask "Any additional activity?" If yes, let him describe it (for example the compliance officer was on site, a meeting, a call). Save to additionalActivity.
+Step 7 - Missing items: call check_missing. Ask about each item it returns, one at a time, and save the answer. If he skips one, leave it. For deficiencies, if he says there were none, save "None observed." to deficiencies.
+Step 8 - Read-back: summarize his answers in a few short sentences and ask "Anything to correct?" Fix anything he corrects with save_section. When he says it's right, call finish_review.
+Step 9 - this test version stops here: say "Got it. Your answers are in the log. In this test version nothing goes into the report yet. Say stop when you're done."`;
 }
 
+const SECTIONS = { siteActivity: 'Field activity', fieldInspection: 'Field inspections', deputyCoverage: 'Deputy coverage',
+  sameDayInspections: 'Same-day inspection requests', additionalActivity: 'Additional activity', deficiencies: 'Deficiencies' };
 const TOOLS = [{ functionDeclarations: [
   { name: 'set_report_date', description: 'Set the date of the daily report Ivan is reporting on.',
     parameters: { type: 'OBJECT', properties: { date: { type: 'STRING', description: 'YYYY-MM-DD' } }, required: ['date'] } },
@@ -143,6 +157,15 @@ const TOOLS = [{ functionDeclarations: [
     parameters: { type: 'OBJECT', properties: { query: { type: 'STRING', description: 'What Ivan said, numbers as digits' } }, required: ['query'] } },
   { name: 'confirm_project', description: 'Set the project once Ivan has confirmed it.',
     parameters: { type: 'OBJECT', properties: { number: { type: 'STRING', description: 'Project number, e.g. S241643' } }, required: ['number'] } },
+  { name: 'save_section', description: 'Save Ivan\'s answers for one section of the interview. Replaces that section, so send every line for it.',
+    parameters: { type: 'OBJECT', properties: {
+      section: { type: 'STRING', enum: Object.keys(SECTIONS) },
+      lines: { type: 'ARRAY', items: { type: 'STRING' }, description: 'All the lines for this section, close to his own words' } }, required: ['section', 'lines'] } },
+  { name: 'remember_deputy', description: 'Remember a new deputy inspector name after Ivan confirmed its spelling.',
+    parameters: { type: 'OBJECT', properties: { name: { type: 'STRING' } }, required: ['name'] } },
+  { name: 'check_missing', description: 'List the report items not covered yet.', parameters: { type: 'OBJECT', properties: {} } },
+  { name: 'get_report', description: 'Get the report data and his answers so far again.', parameters: { type: 'OBJECT', properties: {} } },
+  { name: 'finish_review', description: 'Ivan confirmed the read-back is right.', parameters: { type: 'OBJECT', properties: {} } },
   { name: 'end_interview', description: 'End the session when Ivan says stop.', parameters: { type: 'OBJECT', properties: {} } }
 ] }];
 
@@ -199,17 +222,20 @@ async function loadReport(p) {
   status('Loading the report…');
   try {
     const r = await call('driveReport', KEY, STATE.date || INIT.today, p.number);
+    // Another day or project: the answers so far belong to the old one
+    if (!STATE.report || STATE.report.date !== r.date || STATE.report.project !== r.project) { STATE.answers = {}; showAnswers(); }
     STATE.report = r;
     const sections = r.draft ? Object.fromEntries(Object.entries(r.draft.sections).filter(([, l]) => l.length)) : {};
     log('App', `Report ${r.date}: ${r.draft ? 'draft found (' + (Object.keys(sections).join(', ') || 'empty') + ')' : 'no draft yet'}; ` +
       `${r.inspections.length} inspection request(s) on the IR Log; last report ${r.previous ? r.previous.date : 'none'}.`);
-    out.report = {
+    STATE.forGemini = out.report = {
       draftForThisDay: r.draft ? 'yes' : 'no draft yet for this day',
       draftSections: sections,
       lastReportDate: r.previous ? r.previous.date : 'none found',
       lastReportSiteActivity: r.previous ? r.previous.siteActivity : [],
       inspectionRequestsThisDay: r.inspections.map(i => `IR# ${i.ir} - ${i.type}${i.time ? ' at ' + i.time : ''} - ` +
-        `${i.inspectedBy === 'Deputy' ? 'deputy inspection' : 'IOR inspection'}${i.contractor ? ' - ' + i.contractor : ''}${i.location ? ' - ' + i.location : ''}`)
+        `${i.inspectedBy === 'Deputy' ? 'deputy inspection' : 'IOR inspection'}${i.contractor ? ' - ' + i.contractor : ''}${i.location ? ' - ' + i.location : ''}`),
+      knownDeputies: r.knownDeputies || []
     };
   } catch (e) {
     log('App', 'Report not loaded: ' + (e.message || e));
@@ -219,8 +245,66 @@ async function loadReport(p) {
   return out;
 }
 
+let pendingDeputies = [];
+function showAnswers() {
+  const box = $('answers');
+  box.textContent = '';
+  Object.keys(SECTIONS).filter(k => (STATE.answers[k] || []).length).forEach(k => {
+    const d = document.createElement('div');
+    d.style.margin = '6px 0';
+    d.innerHTML = '<b></b><br>'; d.firstChild.textContent = SECTIONS[k];
+    d.appendChild(document.createTextNode(STATE.answers[k].join(' | ')));
+    box.appendChild(d);
+  });
+}
+// The report items nothing has covered yet: section gaps and inspection requests not mentioned in the answers
+function missingItems() {
+  const r = STATE.report, a = STATE.answers;
+  if (!r) return ['The project is not confirmed yet.'];
+  const said = Object.keys(a).map(k => a[k].join('\n')).join('\n');
+  const miss = [];
+  if (!(a.siteActivity || []).length && !(r.draft && (r.draft.sections['Site Activity'] || []).length)) miss.push('Site activity: which subcontractors were on site and what they did');
+  r.inspections.forEach(i => {
+    const n = String(i.ir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!new RegExp('(^|[^0-9.])' + n + '($|[^0-9.])').test(said)) miss.push(`IR# ${i.ir} - ${i.type}: ${i.inspectedBy === 'Deputy' ? 'who covered it' : 'what took place and where'}`);
+  });
+  if (!(a.deficiencies || []).length) miss.push('Deficiencies: were any observed? The report says none unless he reports one.');
+  return miss;
+}
+
 function runTool(name, args) {
   args = args || {};
+  if (name === 'save_section') {
+    if (!SECTIONS[args.section]) return { ok: false, error: 'Unknown section.' };
+    STATE.answers[args.section] = (args.lines || []).map(l => String(l).trim()).filter(Boolean);
+    showAnswers();
+    log('App', `Saved ${SECTIONS[args.section]}: ${STATE.answers[args.section].join(' | ') || '(empty)'}`);
+    if (/deputyCoverage|sameDayInspections/.test(args.section)) {
+      const text = STATE.answers[args.section].join(' ').toLowerCase();
+      pendingDeputies = pendingDeputies.filter(n => {
+        if (text.indexOf(n.toLowerCase()) === -1) return true;
+        log('App', `New deputy name: ${n}`);
+        call('driveRememberDeputy', KEY, n).catch(e => log('App', 'Deputy name not saved for next time: ' + (e.message || e)));
+        return false;
+      });
+    }
+    return { ok: true };
+  }
+  if (name === 'remember_deputy') {
+    // Kept only if the name ends up in a saved answer, i.e. after he confirmed the spelling (see save_section)
+    if (args.name) pendingDeputies.push(String(args.name).trim());
+    return { ok: true };
+  }
+  if (name === 'check_missing') {
+    const missing = missingItems();
+    log('App', `Missing check: ${missing.join(' | ') || 'nothing missing'}`);
+    return { missing };
+  }
+  if (name === 'get_report') return { report: STATE.forGemini, answersSoFar: STATE.answers };
+  if (name === 'finish_review') {
+    log('App', 'Read-back confirmed by Ivan.');
+    return { ok: true, note: 'This test version does not write to the report.' };
+  }
   if (name === 'set_report_date') {
     const m = String(args.date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
     const d = m && new Date(+m[1], +m[2] - 1, +m[3], 12);
@@ -351,9 +435,10 @@ function onMessage(m, resuming) {
     if (resuming) { log('App', 'Reconnected.'); return; }
     // A new session (first start, or the old one couldn't be resumed): tell Gemini what is already set
     const known = [STATE.date ? `the date is set to ${STATE.dateSpoken} (${STATE.date})` : '',
-      STATE.project ? `the project is set to ${STATE.project.number} ${projName(STATE.project)}` : ''].filter(Boolean);
+      STATE.project ? `the project is set to ${STATE.project.number} ${projName(STATE.project)}` : '',
+      Object.keys(STATE.answers).length ? `his answers so far are ${JSON.stringify(STATE.answers)}` : ''].filter(Boolean);
     const text = known.length ? `We were cut off. Already done: ${known.join(' and ')}. Briefly say you're back and continue from the next step` +
-        (STATE.project ? ' (call confirm_project again with the same number to get the report data back).' : '.')
+        (STATE.project ? ' (call get_report for the report data).' : '.')
       : 'Start the interview.';
     send({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } });
     return;
@@ -385,6 +470,9 @@ async function start() {
   status('Starting…', 'Allow the microphone if the phone asks.');
   try {
     running = true; resumeHandle = ''; everConnected = false; failures = 0;
+    // A new START is a new interview (a dropped signal reconnects without coming through here)
+    Object.assign(STATE, { date: '', dateSpoken: '', project: null, report: null, forGemini: null, answers: {} });
+    chips(); showAnswers();
     // Create and wake the audio right at the tap, before anything waits (iPhones only allow it there)
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     ctx.resume().catch(() => {});
