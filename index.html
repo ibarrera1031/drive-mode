@@ -46,6 +46,21 @@
   </div>
   <a id="openHosted" class="big hidden" target="_top"
     style="display:flex;align-items:center;justify-content:center;background:#2563eb;text-decoration:none;text-align:center">OPEN DRIVE MODE</a>
+  <label class="chip"><b>Voice (used from the next START)</b>
+    <select id="voice" style="width:100%;font-size:17px;font-weight:600;background:var(--card);color:var(--text);border:0;padding:4px 0">
+      <option value="Kore">Kore – firm</option>
+      <option value="Aoede">Aoede – breezy</option>
+      <option value="Leda">Leda – youthful</option>
+      <option value="Zephyr">Zephyr – bright</option>
+      <option value="Sulafat">Sulafat – warm</option>
+      <option value="Gacrux">Gacrux – mature</option>
+      <option value="Puck">Puck – upbeat</option>
+      <option value="Charon">Charon – informative</option>
+      <option value="Fenrir">Fenrir – excitable</option>
+      <option value="Orus">Orus – firm</option>
+      <option value="Achird">Achird – friendly</option>
+      <option value="Schedar">Schedar – even</option>
+    </select></label>
   <details><summary>Answers so far</summary><div id="answers" style="font-size:14px;line-height:1.45;margin-top:8px"></div></details>
   <details><summary>Transcript (saved to the Drive Mode Log tab)</summary><div id="log"></div></details>
 </main>
@@ -382,7 +397,11 @@ function stopPlayback() { playing.forEach(s => { try { s.stop(); } catch (e) {} 
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function getToken() { return call('driveLiveToken', KEY); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-let everConnected = false, failures = 0;
+let everConnected = false, failures = 0, sessionVoice = '';
+// The voice he picked stays on this phone
+try { const v = localStorage.getItem('driveVoice'); if (v) $('voice').value = v; } catch (e) {}
+if (!$('voice').value) $('voice').selectedIndex = 0;   // a saved voice no longer on the list
+$('voice').onchange = () => { try { localStorage.setItem('driveVoice', $('voice').value); } catch (e) {} };
 async function connect() {
   const token = await getToken();
   setupDone = false;
@@ -392,7 +411,7 @@ async function connect() {
   sock.binaryType = 'arraybuffer';
   sock.onopen = () => send({ setup: {
     model: INIT.model,
-    generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: INIT.voice } } } },
+    generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: sessionVoice } } } },
     systemInstruction: { parts: [{ text: systemText() }] },
     tools: TOOLS,
     inputAudioTranscription: {}, outputAudioTranscription: {},
@@ -470,6 +489,7 @@ async function start() {
   status('Starting…', 'Allow the microphone if the phone asks.');
   try {
     running = true; resumeHandle = ''; everConnected = false; failures = 0;
+    sessionVoice = $('voice').value;
     // A new START is a new interview (a dropped signal reconnects without coming through here)
     Object.assign(STATE, { date: '', dateSpoken: '', project: null, report: null, forGemini: null, answers: {} });
     chips(); showAnswers();
