@@ -62,7 +62,7 @@
       <option value="Schedar">Schedar – even</option>
     </select></label>
   <a id="draftLink" class="chip hidden" target="_blank" style="color:var(--accent);font-weight:600;text-align:center">Open the draft report</a>
-  <details><summary>Answers so far</summary><div id="answers" style="font-size:14px;line-height:1.45;margin-top:8px"></div></details>
+  <details><summary>Notes for this report</summary><div id="answers" style="font-size:14px;line-height:1.45;margin-top:8px"></div></details>
   <details><summary>Transcript (saved to the Drive Mode Log tab)</summary><div id="log"></div></details>
 </main>
 
@@ -82,7 +82,9 @@ function call(fn, ...args) {
     .then(r => r.json()).then(j => { if (!j.ok) throw new Error(j.error); return j.result; });
 }
 // Interview state (also what a reconnect tells Gemini if the session can't be resumed)
-const STATE = { date: '', dateSpoken: '', project: null, report: null, forGemini: null, answers: {}, interviewId: '' };
+// mode: 'setup' (asks date and project) -> 'dictation' (only listens) -> 'writing' -> 'done' (draft written)
+const STATE = { mode: 'setup', date: '', dateSpoken: '', project: null, report: null, notes: [], interviewId: '' };
+let allowSpeech = false, heardSpeech = false, lastWriteFailed = false;   // past setup, Gemini is heard only when the app asks it to speak
 let ws = null, running = false, setupDone = false, resumeHandle = '', reconnecting = false;
 let ctx = null, micStream = null, micNode = null, nextPlay = 0, playing = [], wakeLock = null;
 let userText = '', botText = '';
@@ -130,44 +132,25 @@ window.addEventListener('online', flushLog);
 // ---------- what Gemini is told ----------
 function systemText() {
   return `You are the hands-free report assistant for Ivan, a California HCAI Inspector of Record (IOR), while he is driving.
-He cannot look at or touch the phone. Speak English. Ask short, clear questions, one at a time, and keep every reply to one or two short sentences.
+He cannot look at or touch the phone. Speak English. Keep every reply to one short sentence.
 After asking a question, stop and wait for him to answer. Never answer for him, and never call a tool based on a guess. Call set_report_date only after he has said a date, find_project only with words he actually said, and confirm_project only after he has said yes to that project.
 Today is ${INIT.todaySpoken}.
 
-Voice commands he can say at any time:
+Voice commands while you are asking the date and project:
 - "stop": say a very short goodbye, then call end_interview.
 - "repeat": repeat your last question.
-- "skip": move on to the next step.
-- "go back": return to the previous step.
+- "go back": return to the previous question.
 
 Step 1 - Date: ask "What date is this report for?" Turn answers like "today", "yesterday" or "last Tuesday" into a date and call set_report_date with it as YYYY-MM-DD. Say the date back with the weekday and ask him to confirm. If he says no, ask again.
-Step 2 - Project: ask "Which project?" Call find_project with what he said (pass a project number as digits). If there is one clear match, ask "Is that <name>?" If there are several, read up to three names and ask which one. If none, look in his project list below yourself for the closest one (he may use a nickname, e.g. "WiFi phase 2" is "WiFi Ph 2"). If you still can't tell, ask him to say the name or the number again. When he confirms, call confirm_project with that project's number. If he later changes the date or the project, set it again and call confirm_project again.
+Step 2 - Project: ask "Which project?" Call find_project with what he said (pass a project number as digits). If there is one clear match, ask "Is that <name>?" If there are several, read up to three names and ask which one. If none, look in his project list below yourself for the closest one (he may use a nickname, e.g. "WiFi phase 2" is "WiFi Ph 2"). If you still can't tell, ask him to say the name or the number again. When he confirms, call confirm_project with that project's number.
 
 His active projects (number - name):
 ${INIT.projects.map(p => `${p.number} - ${p.calName && p.calName !== p.number ? p.calName + ' (' + p.name + ')' : p.name}`).join('\n')}
 
-Rules for the rest of the interview:
-- When he finishes a section, or at any time he adds something, save it. He may keep adding after the read-back; that is fine.
-- Before each section, briefly read back what the report already has for it, so he only fills the gaps. Skip anything empty. Give an IR number and type; never read descriptions word for word.
-- Ask one question at a time. Let him answer freely, and ask a short follow-up only if something is unclear or missing.
-- Record only what he says, in his own words. Don't reword it or add anything: "Meadows Mechanical is gone" stays "Meadows Mechanical is gone". Never invent names, locations, results or plan references.
-- Call save_section right after each answer, before asking the next question. It replaces that section, so send every line for it each time, earlier ones included.
-- "skip" moves on without saving. "go back" returns to the previous step; correct it with save_section.
-- Don't say tool names or section keys out loud. If you've lost the report data, call get_report.
-
-Step 3 - Field activity: confirm_project returned the report data. Read back the subcontractors in that day's draft; if it has none, read those from the last report and say that report's date. Ask "What's changed since then: new crews, crews gone, or updates to their work?" Save to siteActivity. If nothing changed, save "No change from the report of <that date>."
-Step 4 - Field inspections: read back the IOR inspection requests for that day and any inspection text already in the draft. Ask what actually took place and where, one inspection at a time. If he doesn't say where, ask. Save to fieldInspection, one line per inspection starting "IR# <number> - ". Text already in the draft stays as written, so don't repeat it. If what he says contradicts it (the draft says no issues found and closed, but it failed or didn't happen), read him the conflict and ask if he wants that line replaced. Only if he says yes, save the replacement to corrections, starting "IR# <number> - ". If there are no IOR inspection requests, ask whether he did any field inspections.
-Step 5 - Deputy inspector: for each deputy inspection request that day, ask who covered it. If the name sounds like one in knownDeputies, even if he only gives part of it, use the full name as spelled there without asking. If it is a new name, spell it back letter by letter and wait for his answer; only after he confirms, call remember_deputy. Save to deputyCoverage, one line each, like "IR# 21 - Deputy Inspector Steve Smith was on site." Don't ask for other deputy details; those come later from the deputy's own report.
-Then, whether or not there were deputy inspections, ask "Did the contractor add any inspection requests that same day?" For each one get the IR number, who covered it and what it was for. Save to sameDayInspections, like "Added inspection request number 21, submitted today by the contractor, covered by John Smith, for fire stopping."
-Step 6 - Additional activity: ask "Any additional activity?" If yes, let him describe it (for example the compliance officer was on site, a meeting, a call). Save to additionalActivity.
-Step 7 - Missing items: call check_missing. Ask about each item it returns, one at a time, and save the answer. If he skips one, leave it. For deficiencies, if he says there were none, save "None observed." to deficiencies.
-Step 8 - Read-back: summarize his answers in a few short sentences and ask "Anything to correct?" Fix anything he corrects with save_section. When he says it's right, call finish_review. It writes his answers into the draft report and can take up to a minute; say "Writing the draft now." first.
-Step 9 - if finish_review worked: say "Your draft is updated. Nothing is final until you review and approve it. Anything to add, or say stop." If he adds something, save it and call finish_review again; it updates the draft without repeating lines. If it failed: tell him briefly that the draft wasn't updated and his answers are safe in the log, and offer to try again.`;
+Step 3 - Listen: after confirm_project, say only "Go ahead." If it returned a problem, say that instead. From then on he dictates his report. Do not ask questions, read back, summarize, comment or call tools. The app records him and knows when he is finished. If you have to reply, say only "Okay."
+Only speak again when a message starting "APP:" tells you to, and then say exactly what it tells you. If an APP message says he is starting another report, go back to Step 1.`;
 }
 
-const SECTIONS = { siteActivity: 'Field activity', fieldInspection: 'Field inspections', deputyCoverage: 'Deputy coverage',
-  sameDayInspections: 'Same-day inspection requests', additionalActivity: 'Additional activity', deficiencies: 'Deficiencies',
-  corrections: 'Corrections to lines already in the draft' };
 const TOOLS = [{ functionDeclarations: [
   { name: 'set_report_date', description: 'Set the date of the daily report Ivan is reporting on.',
     parameters: { type: 'OBJECT', properties: { date: { type: 'STRING', description: 'YYYY-MM-DD' } }, required: ['date'] } },
@@ -175,19 +158,10 @@ const TOOLS = [{ functionDeclarations: [
     parameters: { type: 'OBJECT', properties: { query: { type: 'STRING', description: 'What Ivan said, numbers as digits' } }, required: ['query'] } },
   { name: 'confirm_project', description: 'Set the project once Ivan has confirmed it.',
     parameters: { type: 'OBJECT', properties: { number: { type: 'STRING', description: 'Project number, e.g. S241643' } }, required: ['number'] } },
-  { name: 'save_section', description: 'Save Ivan\'s answers for one section of the interview. Replaces that section, so send every line for it.',
-    parameters: { type: 'OBJECT', properties: {
-      section: { type: 'STRING', enum: Object.keys(SECTIONS) },
-      lines: { type: 'ARRAY', items: { type: 'STRING' }, description: 'All the lines for this section, close to his own words' } }, required: ['section', 'lines'] } },
-  { name: 'remember_deputy', description: 'Remember a new deputy inspector name after Ivan confirmed its spelling.',
-    parameters: { type: 'OBJECT', properties: { name: { type: 'STRING' } }, required: ['name'] } },
-  { name: 'check_missing', description: 'List the report items not covered yet.', parameters: { type: 'OBJECT', properties: {} } },
-  { name: 'get_report', description: 'Get the report data and his answers so far again.', parameters: { type: 'OBJECT', properties: {} } },
-  { name: 'finish_review', description: 'Ivan confirmed the read-back is right: writes his answers into the draft report.', parameters: { type: 'OBJECT', properties: {} } },
   { name: 'end_interview', description: 'End the session when Ivan says stop.', parameters: { type: 'OBJECT', properties: {} } }
 ] }];
 
-// ---------- the tools (run on the phone; only finish_review changes the report) ----------
+// ---------- the tools (run on the phone) ----------
 // Spoken words -> search words: "Wi-Fi phase two" -> wifi, ph, 2; "two forty one" -> 2, 41; "Phase II" -> ph, 2
 const ONES = { zero: 0, oh: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
   twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
@@ -234,113 +208,99 @@ function findProjects(query) {
     .map(x => ({ number: x.p.number, name: projName(x.p), fullName: x.p.name }));
 }
 
-// Stage 2: the day's draft, the last report's site activity and the day's inspection requests, for the read-back
+// The day's draft: only to warn right away if it is already finalized. Then the app just listens.
 async function loadReport(p) {
   const out = { ok: true, number: p.number, name: projName(p) };
   status('Loading the report…');
   try {
     const r = await call('driveReport', KEY, STATE.date || INIT.today, p.number);
-    // Another day or project: the answers so far belong to the old one
-    if (!STATE.report || STATE.report.date !== r.date || STATE.report.project !== r.project) { STATE.answers = {}; showAnswers(); }
     STATE.report = r;
-    const sections = r.draft ? Object.fromEntries(Object.entries(r.draft.sections).filter(([, l]) => l.length)) : {};
-    log('App', `Report ${r.date}: ${r.draft ? 'draft found (' + (Object.keys(sections).join(', ') || 'empty') + ')' : 'no draft yet'}; ` +
-      `${r.inspections.length} inspection request(s) on the IR Log; last report ${r.previous ? r.previous.date : 'none'}.`);
-    STATE.forGemini = out.report = {
-      draftForThisDay: r.draft ? 'yes' : 'no draft yet for this day',
-      draftSections: sections,
-      lastReportDate: r.previous ? r.previous.date : 'none found',
-      lastReportSiteActivity: r.previous ? r.previous.siteActivity : [],
-      inspectionRequestsThisDay: r.inspections.map(i => `IR# ${i.ir} - ${i.type}${i.time ? ' at ' + i.time : ''} - ` +
-        `${i.inspectedBy === 'Deputy' ? 'deputy inspection' : 'IOR inspection'}${i.contractor ? ' - ' + i.contractor : ''}${i.location ? ' - ' + i.location : ''}`),
-      knownDeputies: r.knownDeputies || []
-    };
+    log('App', `Report ${r.date}: ${r.draft ? 'draft found (' + r.draft.status + ')' : 'no draft yet'}; last report ${r.previous ? r.previous.date : 'none'}.`);
+    if (r.draft && /^(completed|generating)/i.test(r.draft.status)) {
+      out.ok = false;
+      out.problem = 'That report is already finalized. Tell him, and ask for another date or project.';
+      status('Listening…');
+      return out;
+    }
   } catch (e) {
     log('App', 'Report not loaded: ' + (e.message || e));
-    out.reportError = 'The report could not be loaded (' + (e.message || e) + '). Tell him briefly and offer to try again.';
+    STATE.report = { date: STATE.date || INIT.today, project: p.number };   // the write checks again
   }
-  status('Listening…');
+  STATE.mode = 'dictation'; allowSpeech = true; heardSpeech = false;
+  status('Listening…', 'Say "end of report" when you are finished.');
   return out;
 }
 
-let pendingDeputies = [];
-function showAnswers() {
-  const box = $('answers');
-  box.textContent = '';
-  Object.keys(SECTIONS).filter(k => (STATE.answers[k] || []).length).forEach(k => {
-    const d = document.createElement('div');
-    d.style.margin = '6px 0';
-    d.innerHTML = '<b></b><br>'; d.firstChild.textContent = SECTIONS[k];
-    d.appendChild(document.createTextNode(STATE.answers[k].join(' | ')));
-    box.appendChild(d);
-  });
+function showNotes() { $('answers').textContent = STATE.notes.join(' | '); }
+
+// ---------- dictation: what he says is the record, so nothing depends on Gemini saving it ----------
+const END_PHRASE = /\b(end of (the |this )?report|end report|that('?s| is) (all|it) for (the |this )?report)\b/i;
+const NEXT_PHRASE = /\b(next|another|new) report\b/i;
+const isStopWord = t => /^\W*stop\W*$/i.test(t);
+function speak(text) {
+  allowSpeech = true; heardSpeech = false;
+  send({ clientContent: { turns: [{ role: 'user', parts: [{ text: 'APP: ' + text }] }], turnComplete: true } });
 }
-// The report items nothing has covered yet: section gaps and inspection requests not mentioned in the answers
-function missingItems() {
-  const r = STATE.report, a = STATE.answers;
-  if (!r) return ['The project is not confirmed yet.'];
-  const said = Object.keys(a).map(k => a[k].join('\n')).join('\n');
-  const miss = [];
-  if (!(a.siteActivity || []).length && !(r.draft && (r.draft.sections['Site Activity'] || []).length)) miss.push('Site activity: which subcontractors were on site and what they did');
-  r.inspections.forEach(i => {
-    const n = String(i.ir).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (!new RegExp('(^|[^0-9.])' + n + '($|[^0-9.])').test(said)) miss.push(`IR# ${i.ir} - ${i.type}: ${i.inspectedBy === 'Deputy' ? 'who covered it' : 'what took place and where'}`);
-  });
-  if (!(a.deficiencies || []).length) miss.push('Deficiencies: were any observed? The report says none unless he reports one.');
-  return miss;
+// The phrase can arrive in pieces and straddle two lines
+function checkEndPhrase() {
+  const last = STATE.notes.length ? STATE.notes[STATE.notes.length - 1] : '';
+  const whole = userText.match(END_PHRASE);
+  const m = whole || `${last} ${userText}`.match(END_PHRASE);
+  if (!m) return false;
+  log('Ivan', userText);
+  if (!whole) STATE.notes.pop();
+  const before = (whole ? userText : `${last} ${userText}`).substring(0, m.index).replace(/[\s,]+$/, '');
+  userText = '';
+  if (before) STATE.notes.push(before);
+  showNotes();
+  finishReport();
+  return true;
+}
+const SPOKEN = { 'Site Activity:': 'site activity', 'HCAI Officials / Field Visits:': 'HCAI visit', 'Caltech Labs:': 'deputy inspections',
+  'Field Inspection:': 'field inspections', 'Meetings / Emails / Phone Calls / Communications:': 'communications', 'Deficiencies Noted:': 'deficiencies' };
+async function finishReport() {
+  STATE.mode = 'writing';
+  if (!STATE.notes.length) {
+    STATE.mode = 'done'; lastWriteFailed = false;
+    speak('Say exactly: "I didn\'t hear any notes, so nothing was written. Say next report, or stop."');
+    return;
+  }
+  status('Writing the draft…', '');
+  log('App', 'End of report.');
+  flushLog();
+  const r = await writeDraft();
+  STATE.mode = 'done'; lastWriteFailed = !r.ok;
+  status(r.ok ? 'Draft updated' : 'Draft not updated', r.ok ? 'Review and approve it when you are parked.' : String(r.error || ''));
+  if (!r.ok) { speak(`Say exactly: "The draft was not updated, but your notes are saved in the log. Say try again, or stop."`); return; }
+  const names = (r.sections || []).map(h => SPOKEN[h] || h.replace(/:$/, '')).join(', ');
+  speak(`Say exactly: "Draft updated with ${names || 'your corrections'}.${r.siteFrom ? ' Site activity copied from ' + r.siteFrom + '.' : ''}` +
+    `${(r.warnings || []).join(' ') ? ' ' + r.warnings.join(' ') : ''}${r.aiFailed ? ' The formatting failed, so your own words are in the draft, flagged for clean-up.' : ''} Say next report, or stop."`);
+}
+function nextReport() {
+  Object.assign(STATE, { mode: 'setup', date: '', dateSpoken: '', project: null, report: null, notes: [], interviewId: new Date().toISOString() });
+  chips(); showNotes(); $('draftLink').classList.add('hidden');
+  status('Listening…', '');
+  log('App', 'Next report.');
+  speak('He is starting another report. Go back to Step 1 and ask the date.');
 }
 
-// Stage 4: answers -> the day's draft. One write at a time, so a repeated call can't add lines twice.
-let writing = null;
+// The draft: one write at a time
 async function writeDraft() {
-  if (!STATE.report || !STATE.project) return { ok: false, error: 'The project is not confirmed yet.' };
-  status('Writing the draft…');
   try {
-    const r = await call('driveWriteDraft', KEY, STATE.report.date, STATE.project.number, STATE.answers, STATE.interviewId);
+    const r = await call('driveWriteDraft', KEY, STATE.report.date, STATE.project.number, { notes: STATE.notes }, STATE.interviewId);
     if (!r.ok) { log('App', 'Draft not updated: ' + r.error); return r; }
-    log('App', `Draft updated: ${r.added} line(s) added, ${r.removed} replaced, ${r.corrected} corrected.${r.aiFailed ? ' Raw notes: AI formatting failed.' : ''} ${r.url}`);
+    log('App', `Draft updated: ${r.added} line(s) added, ${r.removed} replaced, ${r.corrected} corrected.${r.aiFailed ? ' Raw notes: formatting failed.' : ''} ${r.url}`);
     $('draftLink').href = r.url; $('draftLink').classList.remove('hidden');
-    return { ok: true, note: r.aiFailed ? 'His own words were written and flagged for clean-up, because the formatting failed. Tell him.' : 'Written. Not final until he approves it.' };
+    return r;
   } catch (e) {
     log('App', 'Draft not updated: ' + (e.message || e));
     return { ok: false, error: String(e.message || e) };
-  } finally { status('Listening…'); }
+  }
 }
 
 function runTool(name, args) {
   args = args || {};
-  if (name === 'save_section') {
-    if (!SECTIONS[args.section]) return { ok: false, error: 'Unknown section.' };
-    STATE.answers[args.section] = (args.lines || []).map(l => String(l).trim()).filter(Boolean);
-    showAnswers();
-    log('App', `Saved ${SECTIONS[args.section]}: ${STATE.answers[args.section].join(' | ') || '(empty)'}`);
-    if (/deputyCoverage|sameDayInspections/.test(args.section)) {
-      const text = STATE.answers[args.section].join(' ').toLowerCase();
-      pendingDeputies = pendingDeputies.filter(n => {
-        if (text.indexOf(n.toLowerCase()) === -1) return true;
-        log('App', `New deputy name: ${n}`);
-        call('driveRememberDeputy', KEY, n).catch(e => log('App', 'Deputy name not saved for next time: ' + (e.message || e)));
-        return false;
-      });
-    }
-    return { ok: true };
-  }
-  if (name === 'remember_deputy') {
-    // Kept only if the name ends up in a saved answer, i.e. after he confirmed the spelling (see save_section)
-    if (args.name) pendingDeputies.push(String(args.name).trim());
-    return { ok: true };
-  }
-  if (name === 'check_missing') {
-    const missing = missingItems();
-    log('App', `Missing check: ${missing.join(' | ') || 'nothing missing'}`);
-    return { missing };
-  }
-  if (name === 'get_report') return { report: STATE.forGemini, answersSoFar: STATE.answers };
-  if (name === 'finish_review') {
-    log('App', 'Read-back confirmed by Ivan.');
-    writing = (writing || Promise.resolve()).then(writeDraft);
-    return writing;
-  }
+  if (STATE.mode !== 'setup') return { ok: true, note: 'Stay silent. The app is recording him.' };
   if (name === 'set_report_date') {
     const m = String(args.date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
     const d = m && new Date(+m[1], +m[2] - 1, +m[3], 12);
@@ -474,12 +434,13 @@ function onMessage(m, resuming) {
     status('Listening…', '');
     if (resuming) { log('App', 'Reconnected.'); return; }
     // A new session (first start, or the old one couldn't be resumed): tell Gemini what is already set
+    if (STATE.mode !== 'setup') {
+      send({ clientContent: { turns: [{ role: 'user', parts: [{ text: 'APP: We were cut off, but the date and project are set and the app is still recording him. Stay silent.' }] }], turnComplete: true } });
+      return;
+    }
     const known = [STATE.date ? `the date is set to ${STATE.dateSpoken} (${STATE.date})` : '',
-      STATE.project ? `the project is set to ${STATE.project.number} ${projName(STATE.project)}` : '',
-      Object.keys(STATE.answers).length ? `his answers so far are ${JSON.stringify(STATE.answers)}` : ''].filter(Boolean);
-    const text = known.length ? `We were cut off. Already done: ${known.join(' and ')}. Briefly say you're back and continue from the next step` +
-        (STATE.project ? ' (call get_report for the report data).' : '.')
-      : 'Start the interview.';
+      STATE.project ? `the project is set to ${STATE.project.number} ${projName(STATE.project)}` : ''].filter(Boolean);
+    const text = known.length ? `We were cut off. Already done: ${known.join(' and ')}. Briefly say you're back and continue from the next step.` : 'Start.';
     send({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } });
     return;
   }
@@ -495,13 +456,28 @@ function onMessage(m, resuming) {
   }
   const sc = m.serverContent;
   if (!sc) return;
-  if (sc.inputTranscription && sc.inputTranscription.text) userText += sc.inputTranscription.text;
-  if (sc.outputTranscription && sc.outputTranscription.text) { if (userText) flushUser(); botText += sc.outputTranscription.text; }
-  ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || 'audio')) playChunk(p.inlineData.data); });
-  if (sc.interrupted) { stopPlayback(); flushTurn(); status('Listening…'); }
-  if (sc.turnComplete) flushTurn();
+  if (sc.inputTranscription && sc.inputTranscription.text) {
+    userText += sc.inputTranscription.text;
+    if (STATE.mode === 'dictation') checkEndPhrase();
+    else if (STATE.mode === 'done' && NEXT_PHRASE.test(userText)) { log('Ivan', userText); userText = ''; nextReport(); }
+    else if (STATE.mode === 'done' && lastWriteFailed && /\btry again\b/i.test(userText)) { log('Ivan', userText); userText = ''; finishReport(); }
+  }
+  // Past setup Gemini stays muted unless the app asked it to speak (it can't help answering each pause)
+  const audible = STATE.mode === 'setup' || allowSpeech;
+  if (audible && sc.outputTranscription && sc.outputTranscription.text) { if (userText) flushUser(); botText += sc.outputTranscription.text; }
+  if (audible) ((sc.modelTurn && sc.modelTurn.parts) || []).forEach(p => { if (p.inlineData && /audio/.test(p.inlineData.mimeType || 'audio')) { heardSpeech = true; playChunk(p.inlineData.data); } });
+  if (sc.interrupted) { if (audible) stopPlayback(); heardSpeech = false; if (audible) flushTurn(); }
+  if (sc.turnComplete) {
+    flushTurn();
+    if (heardSpeech && STATE.mode !== 'setup') allowSpeech = false;
+  }
 }
-function flushUser() { log('Ivan', userText); userText = ''; }
+function flushUser() {
+  const said = userText; userText = '';
+  log('Ivan', said);
+  if (isStopWord(said) && STATE.mode !== 'setup') { stop('Stopped by voice.'); return; }
+  if (STATE.mode === 'dictation') { STATE.notes.push(said.trim()); showNotes(); }
+}
 function flushTurn() { if (userText) flushUser(); if (botText) { log('Assistant', botText); botText = ''; } }
 
 // ---------- start / stop ----------
@@ -512,9 +488,10 @@ async function start() {
     running = true; resumeHandle = ''; everConnected = false; failures = 0;
     sessionVoice = $('voice').value;
     // A new START is a new interview (a dropped signal reconnects without coming through here)
-    Object.assign(STATE, { date: '', dateSpoken: '', project: null, report: null, forGemini: null, answers: {}, interviewId: new Date().toISOString() });
+    Object.assign(STATE, { mode: 'setup', date: '', dateSpoken: '', project: null, report: null, notes: [], interviewId: new Date().toISOString() });
+    allowSpeech = false;
     $('draftLink').classList.add('hidden');
-    chips(); showAnswers();
+    chips(); showNotes();
     // Create and wake the audio right at the tap, before anything waits (iPhones only allow it there)
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     ctx.resume().catch(() => {});
@@ -533,6 +510,9 @@ async function start() {
 function stop(why, isError) {
   running = false; setupDone = false;
   flushTurn();
+  // Dictation not ended with "end of report" stays out of the draft; the Drive Mode Log tab has every word
+  if (STATE.mode === 'dictation' && STATE.notes.length) why = (why || 'Stopped.') + ' These notes were not written to the draft; they are in the Drive Mode Log tab.';
+  STATE.mode = 'setup';
   const old = ws; ws = null;
   if (old) { try { if (old.readyState === 1) old.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } })); old.close(); } catch (e) {} }
   stopPlayback();
